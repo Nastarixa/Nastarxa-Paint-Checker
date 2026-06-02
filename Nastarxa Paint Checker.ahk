@@ -838,12 +838,12 @@ AddInputPanel(g) {
     s.OnEvent("Change", (*) => g["AlphaVal"].Text := g["AlphaThreshold"].Value)
 
     g.AddText("x363 y260 cCFCFCF", "Overlay Heatmap Opacity")
-    g.AddSlider("x358 y277 w100 h20 Range0-100 Tooltip vHeatmapOpacity", 30)
-    g.AddText("x462 y277 w42 h18 cFFFFFF Center vHeatmapOpacityVal", "30%")
+    g.AddSlider("x358 y277 w100 h20 Range0-100 Tooltip vHeatmapOpacity", 35)
+    g.AddText("x462 y277 w42 h18 cFFFFFF Center vHeatmapOpacityVal", "35%")
 
 
     g.AddCheckBox("x522 y277 vWhiteInclude cCFCFCF", "Include white pixels")
-    g.AddCheckBox("x665 y277 vFillOnTop cCFCFCF", "Fill On Top")
+    g.AddCheckBox("x665 y277 Checked vFillOnTop cCFCFCF", "Fill On Top")
 
     g.AddText("x25 y305 cCFCFCF", "Name Template:")
     g.AddText("x117 y305 cAFAFAF", "{name} | {width} | {height} | {date} | {time}")
@@ -1983,10 +1983,10 @@ ResetSettings(g, *) {
         ClearAll(g)
         g["AlphaThreshold"].Value := 128
         g["AlphaVal"].Text := "128"
-        g["HeatmapOpacity"].Value := 30
-        g["HeatmapOpacityVal"].Text := "30%"
+        g["HeatmapOpacity"].Value := 35
+        g["HeatmapOpacityVal"].Text := "35%"
         SyncFillColorUi(g, "#FF00FF")
-        g["FillOnTop"].Value := 0
+        g["FillOnTop"].Value := 1
         g["SaveFill"].Value := 0
         g["SaveHeatmap"].Value := 0
         g["SaveOverlay"].Value := 1
