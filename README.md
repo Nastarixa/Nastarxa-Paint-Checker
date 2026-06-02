@@ -1,6 +1,6 @@
 # 🎨 Nastarxa Paint Checker
 
-(Useable but still need some feature and bug fixing, output still only png even when input is tga)
+(Useable but still need some feature and bug fixing, output still only png even when input is tga. make sure fill on top checked for now)
 
 Detect transparent (alpha) pixels in images and generate visual markers, heatmaps, overlays, and detailed analysis reports.
 
