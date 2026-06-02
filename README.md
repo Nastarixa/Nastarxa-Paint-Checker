@@ -1,5 +1,7 @@
 # 🎨 Nastarxa Paint Checker
 
+(Useable but still need some feature and bug fixing)
+
 Detect transparent (alpha) pixels in images and generate visual markers, heatmaps, overlays, and detailed analysis reports.
 
 Perfect for checking paint gaps, transparency leaks, missing fills, export mistakes, and cleanup issues in animation, game assets, sprites, illustrations, and texture workflows.
