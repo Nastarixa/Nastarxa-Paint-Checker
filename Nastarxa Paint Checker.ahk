@@ -250,6 +250,100 @@ class GDI {
                 try DllCall("gdiplus\GdipDeleteGraphics", "Ptr", gfx)
         }
     }
+
+    static SaveWithFormat(pBitmap, file, ext) {
+        switch ext {
+            case "jpg", "jpeg":
+                return this.SaveBitmap(pBitmap, file, "image/jpeg")
+            case "png":
+                return this.SaveBitmap(pBitmap, file, "image/png")
+            case "bmp":
+                return this.SaveBitmap(pBitmap, file, "image/bmp")
+            case "tiff", "tif":
+                return this.SaveBitmap(pBitmap, file, "image/tiff")
+            case "tga":
+                return this.SaveAsTga(pBitmap, file)
+        }
+        return this.SaveBitmap(pBitmap, file, "image/png")
+    }
+
+    static SaveAsTga(pBitmap, file) {
+        dims := this.GetDimensions(pBitmap)
+        w := dims.w, h := dims.h
+        if !w || !h
+            return false
+
+        Rect := Buffer(16, 0)
+        NumPut("UInt", 0, Rect, 0)
+        NumPut("UInt", 0, Rect, 4)
+        NumPut("UInt", w, Rect, 8)
+        NumPut("UInt", h, Rect, 12)
+        bd := Buffer(A_PtrSize = 8 ? 32 : 24, 0)
+        if DllCall("gdiplus\GdipBitmapLockBits", "Ptr", pBitmap, "Ptr", Rect
+            , "UInt", 1, "Int", 0x26200A, "Ptr", bd)
+            return false
+        scan0 := NumGet(bd, 16, "UPtr")
+        stride := NumGet(bd, 8, "Int")
+
+        hasAlpha := false
+        loop h {
+            y := A_Index - 1
+            loop w {
+                off := y * stride + (A_Index - 1) * 4 + 3
+                if NumGet(scan0, off, "UChar") < 255 {
+                    hasAlpha := true
+                    break
+                }
+            }
+            if hasAlpha
+                break
+        }
+
+        bpp := hasAlpha ? 32 : 24
+        rowBytes := w * (bpp // 8)
+        pixelData := Buffer(rowBytes * h)
+
+        loop h {
+            y := A_Index - 1
+            srcRow := y * stride
+            dstOff := y * rowBytes
+            loop w {
+                x := A_Index - 1
+                srcOff := srcRow + x * 4
+                pxOff := dstOff + x * (bpp // 8)
+                NumPut("UChar", NumGet(scan0, srcOff + 0, "UChar"), pixelData, pxOff + 0)
+                NumPut("UChar", NumGet(scan0, srcOff + 1, "UChar"), pixelData, pxOff + 1)
+                NumPut("UChar", NumGet(scan0, srcOff + 2, "UChar"), pixelData, pxOff + 2)
+                if hasAlpha
+                    NumPut("UChar", NumGet(scan0, srcOff + 3, "UChar"), pixelData, pxOff + 3)
+            }
+        }
+
+        DllCall("gdiplus\GdipBitmapUnlockBits", "Ptr", pBitmap, "Ptr", bd)
+
+        try {
+            f := FileOpen(file, "w")
+            if !f
+                return false
+            f.WriteUChar(0)
+            f.WriteUChar(0)
+            f.WriteUChar(2)
+            f.WriteUShort(0)
+            f.WriteUShort(0)
+            f.WriteUChar(0)
+            f.WriteUShort(0)
+            f.WriteUShort(0)
+            f.WriteUShort(w)
+            f.WriteUShort(h)
+            f.WriteUChar(bpp)
+            f.WriteUChar(hasAlpha ? 0x28 : 0x20)
+            f.RawWrite(pixelData)
+            f.Close()
+            return true
+        } catch {
+            return false
+        }
+    }
 }
 
 ; ===================================================================
@@ -420,10 +514,231 @@ LoadImageFallback(file) {
     return 0
 }
 
+GetDefaultHeatmapColors() {
+    return {fill: 0xFFFF0000, edge1: 0xFFFFFF00, edge2: 0xFF80FF00, edge3: 0xFF00FF00
+        , edge4: 0xFF00FF80, edge5: 0xFF0000FF, far: 0xFF0000FF}
+}
+
+ShowHeatmapColorsDialog(g, *) {
+    hc := g.HasOwnProp("_heatmapColors") ? g._heatmapColors : GetDefaultHeatmapColors()
+    hcCopy := {fill: hc.fill, edge1: hc.edge1, edge2: hc.edge2, edge3: hc.edge3
+        , edge4: hc.edge4, edge5: hc.edge5, far: hc.far}
+
+    myGui := Gui("+AlwaysOnTop +ToolWindow +Border", "Heatmap Colors")
+    myGui.BackColor := "2B2D30"
+    myGui.SetFont("s9 cCFCFCF", "Segoe UI")
+
+    presets := Map(
+        "Default", {fill: 0xFFFF0000, edge1: 0xFFFFFF00, edge2: 0xFF80FF00, edge3: 0xFF00FF00, edge4: 0xFF00FF80, edge5: 0xFF0000FF, far: 0xFF0000FF},
+        "Hot", {fill: 0xFFFF0000, edge1: 0xFFFF8000, edge2: 0xFFFFD700, edge3: 0xFFFFFF00, edge4: 0xFFFF8080, edge5: 0xFFFF00FF, far: 0xFFFF00FF},
+        "Cool", {fill: 0xFF0000FF, edge1: 0xFF0066FF, edge2: 0xFF00CCFF, edge3: 0xFF00FFCC, edge4: 0xFF00FF66, edge5: 0xFF00FF00, far: 0xFF00FF00},
+        "Rainbow", {fill: 0xFFFF0000, edge1: 0xFFFF8000, edge2: 0xFFFFFF00, edge3: 0xFF00FF00, edge4: 0xFF0080FF, edge5: 0xFF0000FF, far: 0xFF8000FF},
+        "Monochrome", {fill: 0xFFFFFFFF, edge1: 0xFFE0E0E0, edge2: 0xFFC0C0C0, edge3: 0xFFA0A0A0, edge4: 0xFF808080, edge5: 0xFF606060, far: 0xFF000000},
+        "Fire", {fill: 0xFFFF0000, edge1: 0xFFFF4000, edge2: 0xFFFF8000, edge3: 0xFFFFC000, edge4: 0xFFFFFF00, edge5: 0xFFFFFF80, far: 0xFFFFFFFF},
+        "Ocean", {fill: 0xFF000080, edge1: 0xFF0000FF, edge2: 0xFF0080FF, edge3: 0xFF00FFFF, edge4: 0xFF80FFFF, edge5: 0xFFC0FFFF, far: 0xFFFFFFFF},
+        "Sunset", {fill: 0xFF800080, edge1: 0xFFFF00FF, edge2: 0xFFFF0080, edge3: 0xFFFF0000, edge4: 0xFFFF8000, edge5: 0xFFFFFF00, far: 0xFFFFFF00},
+        "Forest", {fill: 0xFF004000, edge1: 0xFF008000, edge2: 0xFF00C000, edge3: 0xFF80FF00, edge4: 0xFFC0FF00, edge5: 0xFFFFFF00, far: 0xFFFFFF80},
+        "Plasma", {fill: 0xFF440088, edge1: 0xFF7700AA, edge2: 0xFFAA0055, edge3: 0xFFDD3333, edge4: 0xFFFF8833, edge5: 0xFFFFCC44, far: 0xFFFFEE88}
+    )
+; ==========================================================
+; GRADIENT PREVIEW BAR
+; ==========================================================
+
+myGui.AddText("x10 y6 w200 h18 vHC_grad_label", FormatColorArgb(hc.fill) " > " FormatColorArgb(hc.far))
+
+barW := 195
+steps := ["fill", "edge1", "edge2", "edge3", "edge4", "edge5", "far"]
+segW := (barW - 6) // steps.Length
+x := 10
+for _, f in steps {
+    hex := Format("{:06X}", (hc.%f% & 0xFFFFFF))
+    myGui.AddProgress("x" x " y25 w" segW " h10 c" hex " Range0-1 vHC_grad_" f, 1)
+    x += segW + 1
+}
+
+; ==========================================================
+; LEFT COLUMN - COLORS
+; ==========================================================
+
+myGui.AddGroupBox("x5 y40 w225 h210", "Colors")
+
+myGui.AddText("x15 y65", "Transparent:")
+myGui.AddEdit("x95 y63 w80 BackgroundFFFFFF c000000 vHC_fill", FormatColorArgb(hc.fill))
+myGui.AddProgress("x180 y64 w20 h18 cFF0000 Range0-1 vHC_fillSw", 1)
+
+myGui.AddText("x15 y91", "Edge 1:")
+myGui.AddEdit("x95 y89 w80 BackgroundFFFFFF c000000 vHC_edge1", FormatColorArgb(hc.edge1))
+myGui.AddProgress("x180 y90 w20 h18 cFFFF00 Range0-1 vHC_edge1Sw", 1)
+
+myGui.AddText("x15 y117", "Edge 2:")
+myGui.AddEdit("x95 y115 w80 BackgroundFFFFFF c000000 vHC_edge2", FormatColorArgb(hc.edge2))
+myGui.AddProgress("x180 y116 w20 h18 c80FF00 Range0-1 vHC_edge2Sw", 1)
+
+myGui.AddText("x15 y143", "Edge 3:")
+myGui.AddEdit("x95 y141 w80 BackgroundFFFFFF c000000 vHC_edge3", FormatColorArgb(hc.edge3))
+myGui.AddProgress("x180 y142 w20 h18 c00FF00 Range0-1 vHC_edge3Sw", 1)
+
+myGui.AddText("x15 y169", "Edge 4:")
+myGui.AddEdit("x95 y167 w80 BackgroundFFFFFF c000000 vHC_edge4", FormatColorArgb(hc.edge4))
+myGui.AddProgress("x180 y168 w20 h18 c00FF80 Range0-1 vHC_edge4Sw", 1)
+
+myGui.AddText("x15 y195", "Edge 5:")
+myGui.AddEdit("x95 y193 w80 BackgroundFFFFFF c000000 vHC_edge5", FormatColorArgb(hc.edge5))
+myGui.AddProgress("x180 y194 w20 h18 c0000FF Range0-1 vHC_edge5Sw", 1)
+
+myGui.AddText("x15 y221", "Far:")
+myGui.AddEdit("x95 y219 w80 BackgroundFFFFFF c000000 vHC_far", FormatColorArgb(hc.far))
+myGui.AddProgress("x180 y220 w20 h18 c0000FF Range0-1 vHC_farSw", 1)
+
+; ==========================================================
+; RIGHT COLUMN - PRESETS
+; ==========================================================
+
+myGui.AddGroupBox("x240 y5 w145 h280", "Presets")
+
+presetY := 28
+
+for name in presets {
+    pVal := presets[name]
+
+    myGui.AddButton(
+        "x252 y" presetY
+        " w120 h22 Background3A3C42 cFFFFFF",
+        name
+    ).OnEvent("Click", ApplyPreset.Bind(pVal, hcCopy, myGui))
+
+    presetY += 25
+}
+
+; ==========================================================
+; SWATCH SYNC
+; ==========================================================
+
+myGui._syncingHeatmapSwatch := false
+
+for _, f in ["fill", "edge1", "edge2", "edge3", "edge4", "edge5", "far"]
+    myGui["HC_" f].OnEvent("Change", SyncHeatmapSwatch.Bind(myGui, f))
+
+; ==========================================================
+; ACTION BUTTONS
+; ==========================================================
+
+myGui.AddButton(
+    "x10 y260 w100 h28 Background3A3C42 cFFFFFF Default",
+    "OK"
+).OnEvent("Click", (*) => (
+    hcCopy.fill  := ParseColorArgb(myGui["HC_fill"].Value),
+    hcCopy.edge1 := ParseColorArgb(myGui["HC_edge1"].Value),
+    hcCopy.edge2 := ParseColorArgb(myGui["HC_edge2"].Value),
+    hcCopy.edge3 := ParseColorArgb(myGui["HC_edge3"].Value),
+    hcCopy.edge4 := ParseColorArgb(myGui["HC_edge4"].Value),
+    hcCopy.edge5 := ParseColorArgb(myGui["HC_edge5"].Value),
+    hcCopy.far   := ParseColorArgb(myGui["HC_far"].Value),
+    g._heatmapColors := hcCopy,
+    g._defaultSettings := CaptureUiSettings(g),
+    UpdateMainGradient(g),
+    g._pendingRefresh := true,
+    g["PreviewRefresh"].Text := "Apply!",
+    g["PreviewRefresh"].Opt("BackgroundD97706 cffffff"),
+    myGui.Destroy()
+))
+
+myGui.AddButton(
+    "x120 y260 w100 h28 Background3A3C42 cFFFFFF",
+    "Cancel"
+).OnEvent("Click", (*) => myGui.Destroy())
+
+myGui.OnEvent("Close", (*) => myGui.Destroy())
+
+myGui.Show("w390 h300")
+}
+
+SyncHeatmapSwatch(myGui, field, *) {
+    if myGui._syncingHeatmapSwatch
+        return
+    ctrl := myGui["HC_" field]
+    swatch := myGui["HC_" field "Sw"]
+    colorStr := Trim(ctrl.Value)
+    if RegExMatch(colorStr, "i)^#?[0-9a-f]{6}$") {
+        hex := RegExReplace(colorStr, "^#", "")
+        swatch.Opt("c" hex)
+        swatch.Value := 1
+        hc := {}
+        for _, f in ["fill", "edge1", "edge2", "edge3", "edge4", "edge5", "far"]
+            hc.%f% := ParseColorArgb(myGui["HC_" f].Value)
+        UpdateGradientPreview(myGui, hc)
+    }
+}
+
+ApplyPreset(p, hcCopy, myGui, *) {
+    hcCopy.fill := p.fill
+    hcCopy.edge1 := p.edge1
+    hcCopy.edge2 := p.edge2
+    hcCopy.edge3 := p.edge3
+    hcCopy.edge4 := p.edge4
+    hcCopy.edge5 := p.edge5
+    hcCopy.far := p.far
+    myGui._syncingHeatmapSwatch := true
+    for _, f in ["fill", "edge1", "edge2", "edge3", "edge4", "edge5", "far"] {
+        hex := Format("{:06X}", (p.%f% & 0xFFFFFF))
+        myGui["HC_" f].Value := "#" hex
+        myGui["HC_" f "Sw"].Opt("c" hex)
+        myGui["HC_" f "Sw"].Value := 1
+    }
+    UpdateGradientPreview(myGui, p)
+    myGui._syncingHeatmapSwatch := false
+}
+
+UpdateGradientPreview(myGui, hcCopy) {
+    barW := 195
+    steps := ["fill", "edge1", "edge2", "edge3", "edge4", "edge5", "far"]
+    segW := (barW - 6) // steps.Length
+    x := 10
+    for _, f in steps {
+        hex := Format("{:06X}", (hcCopy.%f% & 0xFFFFFF))
+        ctrl := myGui["HC_grad_" f]
+        ctrl.Opt("c" hex)
+        ctrl.Value := 1
+        x += segW + 1
+    }
+    myGui["HC_grad_label"].Value := FormatColorArgb(hcCopy.fill) " > " FormatColorArgb(hcCopy.far)
+}
+
+UpdateMainGradient(g) {
+    hc := g.HasOwnProp("_heatmapColors") ? g._heatmapColors : GetDefaultHeatmapColors()
+    for _, f in ["fill", "edge1", "edge2", "edge3", "edge4", "edge5", "far"] {
+        hex := Format("{:06X}", (hc.%f% & 0xFFFFFF))
+        ctrl := g["MainGrad_" f]
+        ctrl.Opt("c" hex)
+        ctrl.Value := 1
+    }
+    g["MainGradLabel"].Value := FormatColorArgb(hc.fill) " > " FormatColorArgb(hc.far)
+}
+
+FormatColorArgb(argb) {
+    r := Format("{:02X}", (argb >> 16) & 0xFF)
+    g := Format("{:02X}", (argb >> 8) & 0xFF)
+    b := Format("{:02X}", argb & 0xFF)
+    return "#" r g b
+}
+
+ParseColorArgb(text) {
+    text := Trim(text)
+    if SubStr(text, 1, 1) = "#"
+        text := SubStr(text, 2)
+    if StrLen(text) = 6 {
+        r := Integer("0x" SubStr(text, 1, 2))
+        g := Integer("0x" SubStr(text, 3, 2))
+        b := Integer("0x" SubStr(text, 5, 2))
+    } else
+        return 0xFFFF0000
+    return 0xFF000000 | (r << 16) | (g << 8) | b
+}
+
 ; ===================================================================
 ; Image Processing - Paint Checker
 ; ===================================================================
-ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progressCb := 0) {
+ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progressCb := 0, heatmapColors := 0) {
     dims := GDI.GetDimensions(pBitmap)
     w := dims.w, h := dims.h
 
@@ -464,6 +779,12 @@ ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progre
         , "UInt", 2, "Int", 0x26200A, "Ptr", heatBd)
     heatScan0 := NumGet(heatBd, 16, "UPtr")
     heatStride := NumGet(heatBd, 8, "Int")
+
+    ; Resolve heatmap colors before first pass (used by both loops)
+    hc := IsObject(heatmapColors) && heatmapColors.HasOwnProp("fill") ? heatmapColors : GetDefaultHeatmapColors()
+    transColor := hc.fill
+    edgeArr := [0, hc.edge1, hc.edge2, hc.edge3, hc.edge4, hc.edge5]
+    farColor := hc.far
 
     ; Allocate distance buffer for edge gradient
     maxEdgeDist := 5
@@ -506,8 +827,8 @@ ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progre
                 else
                     alphaBuckets[5]++
 
-                ; Heatmap: solid red for transparent pixels
-                NumPut("UInt", 0xFFFF0000, heatScan0, heatOff)
+                ; Heatmap: configurable color for transparent pixels
+                NumPut("UInt", transColor, heatScan0, heatOff)
 
                 ; Distance 0 (transparent pixel)
                 NumPut("UChar", 0, distBuf, y * w + x)
@@ -549,9 +870,6 @@ ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progre
         }
     }
 
-    ; Color non-transparent areas based on distance from transparency
-    static edgeColors := Map(1, 0xFFFFFF00, 2, 0xFF80FF00, 3, 0xFF00FF00
-                    , 4, 0xFF00FF80, 5, 0xFF0000FF)
     loop h {
         y := A_Index - 1
         loop w {
@@ -563,12 +881,7 @@ ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progre
             if val = 0
                 continue
 
-            if val <= maxEdgeDist {
-                NumPut("UInt", edgeColors.Has(val) ? edgeColors[val] : 0xFF0000FF, heatScan0, heatOff)
-            } else {
-                ; Far from transparency: solid blue
-                NumPut("UInt", 0xFF0000FF, heatScan0, heatOff)
-            }
+            NumPut("UInt", val <= maxEdgeDist ? edgeArr[val] : farColor, heatScan0, heatOff)
         }
     }
 
@@ -776,12 +1089,13 @@ BuildGui() {
     g._results := []
     g._currentIndex := 0
     g._defaultSettings := 0
-    g._settingsScope := "All images"
 
     g.Show("w1160 h917")
     SyncFillColorUi(g, g["FillColor"].Value)
+    g._heatmapColors := GetDefaultHeatmapColors()
     g._defaultSettings := CaptureUiSettings(g)
     WireSettingEvents(g)
+    UpdateMainGradient(g)
     return g
 }
 
@@ -811,26 +1125,51 @@ AddInputPanel(g) {
     g.AddCheckBox("x180 y180 vRecursive cCFCFCF", "Include Subfolders")
     g.AddCheckBox("x320 y180 vZipExport cCFCFCF", "Export Outputs as ZIP")
 
-    g.AddText("x25 y205 cCFCFCF", "Settings Scope:")
-    g.AddDropDownList("x25 y225  w160 BackgroundFFFFFF c000000 Choose1 vSettingsScope", ["All images", "Current image"])
+    ; ==========================================================
+    ; LEFT: SAVE OUTPUTS
+    ; ==========================================================
 
-    g.AddText("x205 y205 cCFCFCF", "Save Outputs:")
-    g.AddCheckBox("x205 y225 vSaveFill cCFCFCF", "Filled")
+    g.AddText("x25 y205 cCFCFCF", "Save Outputs:")
+    g.AddCheckBox("x25 y225 vSaveFill cCFCFCF", "Filled")
     g.AddCheckBox("x+5 yp vSaveHeatmap cCFCFCF", "Heatmap")
     g.AddCheckBox("x+5 yp Checked vSaveOverlay cCFCFCF", "Overlay")
     g.AddCheckBox("x+5 yp vSaveReport cCFCFCF", "Report")
 
-    g.AddText("x480 y205 cCFCFCF", "Fill Color:")
-    fillEdit := g.AddEdit("x480 y225 w72 h24 BackgroundFFFFFF c000000 vFillColor","#FF00FF")
-    fillEdit.OnEvent("Change", FillColorChanged.Bind(g))
-    g.AddProgress("x558 y225 w20 h20 cFF00FF Range0-1 vFillColorPreview",1)
-    presetX := 585
+    ; ==========================================================
+    ; CENTER: FILL COLOR
+    ; ==========================================================
+
+    g.AddText("x298 y205 cCFCFCF", "Fill Color:")
+    g.AddEdit("x298 y225 w72 h24 BackgroundFFFFFF c000000 vFillColor","#FF00FF")
+    g.AddProgress("x376 y225 w20 h20 cFF00FF Range0-1 vFillColorPreview",1)
+    presetX := 403
     for i, preset in GetFillColorPresets() {
         swatch := g.AddText("x" presetX " y225 w20 h20 Border Background" SubStr(preset, 2)
             " c000000 vFillPreset" i, " ")
         swatch.OnEvent("Click", ApplyFillColorChoice.Bind(g, preset))
         presetX += 22
     }
+
+    ; ==========================================================
+    ; RIGHT: HEATMAP COLORS
+    ; ==========================================================
+
+    gBarW := 170
+    gSteps := ["fill", "edge1", "edge2", "edge3", "edge4", "edge5", "far"]
+    gSegW := (gBarW - 6) // gSteps.Length
+    gx := 592
+    hc0 := g.HasOwnProp("_heatmapColors") ? g._heatmapColors : GetDefaultHeatmapColors()
+    for _, f in gSteps {
+        hex := Format("{:06X}", (hc0.%f% & 0xFFFFFF))
+        g.AddProgress("x" gx " y242 w" gSegW " h10 c" hex " Range0-1 vMainGrad_" f, 1)
+        gx += gSegW + 1
+    }
+    g.AddText("x592 y254 w170 h14 cAAAAAA Center vMainGradLabel"
+        , FormatColorArgb(hc0.fill) " > " FormatColorArgb(hc0.far))
+    g.AddButton("x590 y214 w170 h24 cFFFFFF Background3A3C42 vHeatmapColorsBtn", "Heatmap Colors")
+        .OnEvent("Click", ShowHeatmapColorsDialog.Bind(g))
+
+
 
     g.AddText("x25 y260 cCFCFCF", "Alpha Threshold")
     s := g.AddSlider("x20 y277 w300 h20 Range0-255 Tooltip vAlphaThreshold", 128)
@@ -843,7 +1182,7 @@ AddInputPanel(g) {
 
 
     g.AddCheckBox("x522 y277 vWhiteInclude cCFCFCF", "Include white pixels")
-    g.AddCheckBox("x665 y277 Checked vFillOnTop cCFCFCF", "Fill On Top")
+    g.AddCheckBox("x665 y277 vFillOnTop cCFCFCF", "Fill On Top")
 
     g.AddText("x25 y305 cCFCFCF", "Name Template:")
     g.AddText("x117 y305 cAFAFAF", "{name} | {width} | {height} | {date} | {time}")
@@ -888,13 +1227,12 @@ AddPreviewTile(g, x, y, picName, labelName, btnName, labelText, which) {
 }
 
 AddPreviewToggles(g) {
+    g.AddText("x25 y797 w70 h22 cFFFFFF Background3A3C42 Center +0x100 +0x200 vPreviewRefresh", "Refresh")
+        .OnEvent("Click", ReprocessCurrent.Bind(g))
     g.AddText("x410 y800 cCFCFCF", "Combined Overlay:")
     g.AddCheckBox("x510 y800 Checked vShowOrig cAAAAAA", "Original")
     g.AddCheckBox("x580 y800 Checked vShowFill cAAAAAA", "Fill")
     g.AddCheckBox("x625 y800 Checked vShowHeatmap cAAAAAA", "Heatmap")
-    g["ShowHeatmap"].OnEvent("Click", (*) => OnSettingChanged(g))
-    g["ShowOrig"].OnEvent("Click", (*) => OnSettingChanged(g))
-    g["ShowFill"].OnEvent("Click", (*) => OnSettingChanged(g))
 }
 
 AddPreviewNavigation(g) {
@@ -951,6 +1289,7 @@ RefreshCurrentPreview(g) {
 }
 
 CaptureUiSettings(g) {
+    hc := g.HasOwnProp("_heatmapColors") ? g._heatmapColors : GetDefaultHeatmapColors()
     return {
         alphaThreshold: g["AlphaThreshold"].Value,
         heatmapOpacity: g["HeatmapOpacity"].Value,
@@ -967,7 +1306,9 @@ CaptureUiSettings(g) {
         whiteInclude: g["WhiteInclude"].Value,
         showHeatmap: g["ShowHeatmap"].Value,
         showOrig: g["ShowOrig"].Value,
-        showFill: g["ShowFill"].Value
+        showFill: g["ShowFill"].Value,
+        heatmapColors: {fill: hc.fill, edge1: hc.edge1, edge2: hc.edge2, edge3: hc.edge3
+            , edge4: hc.edge4, edge5: hc.edge5, far: hc.far}
     }
 }
 
@@ -1012,6 +1353,8 @@ ApplyUiSettings(g, settings) {
             g["ShowOrig"].Value := settings.showOrig
         if settings.HasOwnProp("showFill")
             g["ShowFill"].Value := settings.showFill
+        if settings.HasOwnProp("heatmapColors") && IsObject(settings.heatmapColors)
+            g._heatmapColors := settings.heatmapColors
     } finally {
         g._applyingSettings := false
     }
@@ -1029,8 +1372,6 @@ GetActiveResult(g) {
 }
 
 WireSettingEvents(g) {
-    g["SettingsScope"].OnEvent("Change", (*) => SettingsScopeChanged(g))
-
     for _, name in ["SaveFill", "SaveHeatmap", "SaveOverlay", "SaveReport"
         , "ZipExport", "MakeFolder", "Recursive", "WhiteInclude"
         , "ShowHeatmap", "ShowOrig", "ShowFill", "FillOnTop"] {
@@ -1055,33 +1396,13 @@ WireSettingEvents(g) {
 OnSettingChanged(g, *) {
     if g.HasOwnProp("_applyingSettings") && g._applyingSettings
         return
-
-    scope := g.HasOwnProp("_settingsScope") ? g._settingsScope : g["SettingsScope"].Text
-    if scope = "Current image" {
-        result := GetActiveResult(g)
-        if result
-            result.settings := CaptureUiSettings(g)
-    } else {
-        g._defaultSettings := CaptureUiSettings(g)
-    }
-
+    g._defaultSettings := CaptureUiSettings(g)
     RefreshCurrentPreview(g)
-}
-
-SettingsScopeChanged(g, *) {
-    if g.HasOwnProp("_applyingSettings") && g._applyingSettings
-        return
-    g._settingsScope := g["SettingsScope"].Text
-    if g._settingsScope = "Current image" {
-        result := GetActiveResult(g)
-        if result && result.HasOwnProp("settings") && result.settings
-            ApplyUiSettings(g, result.settings)
-        else if g._defaultSettings
-            ApplyUiSettings(g, g._defaultSettings)
-    } else if g._defaultSettings {
-        ApplyUiSettings(g, g._defaultSettings)
+    g._pendingRefresh := true
+    if g.HasOwnProp("PreviewRefresh") {
+        g["PreviewRefresh"].Text := "Apply!"
+        g["PreviewRefresh"].Opt("BackgroundFF8800 c000000")
     }
-    RefreshCurrentPreview(g)
 }
 
 CreateCheckerboardBitmap(w, h, cellSize := 16) {
@@ -1236,15 +1557,6 @@ ComposeOverlayBitmap(settings, result, filePath := "", sourceBitmap := 0) {
         if settings.showFill
             GDI.DrawBitmap(pBitmap, result.filled, 0, 0, dims.w, dims.h, 0, 0, dims.w, dims.h)
 
-        if settings.showHeatmap {
-            opacity := settings.HasOwnProp("heatmapOpacity") ? settings.heatmapOpacity / 100.0 : 0.3
-            pHeat := ApplyBitmapOpacity(result.heatmap, opacity)
-            if pHeat {
-                GDI.DrawBitmap(pBitmap, pHeat, 0, 0, dims.w, dims.h, 0, 0, dims.w, dims.h)
-                GDI.DisposeImage(pHeat)
-            }
-        }
-
         if settings.showOrig {
             if sourceBitmap {
                 pOrig := sourceBitmap
@@ -1257,6 +1569,15 @@ ComposeOverlayBitmap(settings, result, filePath := "", sourceBitmap := 0) {
                 GDI.DrawBitmap(pBitmap, pOrig, 0, 0, dims.w, dims.h, 0, 0, dims.w, dims.h)
                 if ownOrig
                     GDI.DisposeImage(pOrig)
+            }
+        }
+
+        if settings.showHeatmap {
+            opacity := settings.HasOwnProp("heatmapOpacity") ? settings.heatmapOpacity / 100.0 : 0.3
+            pHeat := ApplyBitmapOpacity(result.heatmap, opacity)
+            if pHeat {
+                GDI.DrawBitmap(pBitmap, pHeat, 0, 0, dims.w, dims.h, 0, 0, dims.w, dims.h)
+                GDI.DisposeImage(pHeat)
             }
         }
     }
@@ -1341,18 +1662,6 @@ FillColorEditChanged(g, *) {
     return false
 }
 
-
-FillColorChanged(g, ctrl, *)
-{
-    if g.HasOwnProp("_syncingFillColor")
-        return
-
-    color := NormalizeHexColor(ctrl.Value)
-
-    UpdateFillColorPreview(g, color)
-
-    OnSettingChanged(g)
-}
 
 ApplyFillColorChoice(g, color, *)
 {
@@ -1602,13 +1911,8 @@ LoadAndShowFile(g, idx) {
         return
     }
 
-    if g["SettingsScope"].Text = "Current image" {
-        result := GetActiveResult(g)
-        if result && result.HasOwnProp("settings") && result.settings
-            ApplyUiSettings(g, result.settings)
-        else if g._defaultSettings
-            ApplyUiSettings(g, g._defaultSettings)
-    }
+    if g._defaultSettings
+        ApplyUiSettings(g, g._defaultSettings)
 
     ; Create thumbnail and show original preview (no stretch)
     pThumb := GDI.CreateThumbnail(pOrig, 360, 170)
@@ -1695,14 +1999,14 @@ StartProcessing(g, *) {
     for file in g._files {
         processed++
         imageStart := A_TickCount
-        baseProgress := Round((processed - 1) / total * 100)
-        g["ProgressBar"].Value := baseProgress
+        g["ProgressBar"].Value := Round((processed - 1) / total * 100)
         g["StatusText"].Value := "Processing (" processed "/" total "): " file
 
         pathParts := StrSplit(file, "\")
         fileName := pathParts[pathParts.Length]
         dotPos := InStr(fileName, ".", 0, -1)
         nameOnly := dotPos ? SubStr(fileName, 1, dotPos - 1) : fileName
+        inputExt := dotPos ? SubStr(fileName, dotPos + 1) : "png"
 
         pBitmap := GDI.LoadImage(file)
         if !pBitmap {
@@ -1729,7 +2033,7 @@ StartProcessing(g, *) {
             elapsed := A_TickCount - overallStart,
             completed := ((processed - 1) + done / total_) / total,
             etaMs := completed > 0 ? Round(elapsed / completed * (1 - completed)) : 0,
-            g["ProgressBar"].Value := baseProgress + Round((done / total_) * (100 / total)),
+            g["ProgressBar"].Value := Round(completed * 100),
             g["StatusText"].Value := "Processing " fileName " (" done "/" total_ ") ~ ETA: " FormatDuration(etaMs)
         )
 
@@ -1739,7 +2043,8 @@ StartProcessing(g, *) {
         GDI.DisposeImage(pThumb)
         log .= "  preview: " (origPreviewFile ? "OK" : "FAILED") "`n"
 
-        result := ProcessPaintCheck(pBitmap, alphaThreshold, NormalizeHexColor(g["FillColor"].Value), progressFn)
+        hc := g.HasOwnProp("_heatmapColors") ? g._heatmapColors : GetDefaultHeatmapColors()
+        result := ProcessPaintCheck(pBitmap, alphaThreshold, NormalizeHexColor(g["FillColor"].Value), progressFn, hc)
 
         if !result {
             GDI.DisposeImage(pBitmap)
@@ -1756,6 +2061,7 @@ StartProcessing(g, *) {
         result.fileName := fileName
         result.fullPath := file
         result.nameOnly := nameOnly
+        result.inputExt := inputExt
         result.outputBase := outputBase
         result.origPreviewFile := origPreviewFile
         result.durationMs := imageDuration
@@ -1808,29 +2114,105 @@ StartProcessing(g, *) {
         g._currentIndex := 1
         LoadAndShowFile(g, 1)
     }
+    ClearPendingRefresh(g)
+}
+
+ClearPendingRefresh(g) {
+    g._pendingRefresh := false
+    if g.HasOwnProp("PreviewRefresh") {
+        g["PreviewRefresh"].Text := "Refresh"
+        g["PreviewRefresh"].Opt("Background3A3C42 cFFFFFF")
+    }
+}
+
+ReprocessCurrent(g, *) {
+    idx := g._currentIndex
+    if idx < 1 || idx > g._files.Length
+        return
+
+    file := g._files[idx]
+    SplitPath(file, &fileName, , &ext, &nameOnly)
+    inputExt := ext = "" ? "png" : ext
+
+    g["StatusText"].Value := "Refreshing: " fileName
+    g["ProgressBar"].Value := 0
+    for i, r in g._results {
+        if ResultMatchesFile(r, file) {
+            if r.HasOwnProp("filled") && r.filled
+                GDI.DisposeImage(r.filled)
+            if r.HasOwnProp("heatmap") && r.heatmap
+                GDI.DisposeImage(r.heatmap)
+            g._results.RemoveAt(i)
+            break
+        }
+    }
+
+    pBitmap := GDI.LoadImage(file)
+    if !pBitmap {
+        if ext = "tga"
+            pBitmap := LoadImageFallback(file)
+    }
+    if !pBitmap {
+        g.Opt("+OwnDialogs")
+        MsgBox("Failed to load image.", "Refresh Error", 48)
+        return
+    }
+
+    alphaThreshold := g["AlphaThreshold"].Value
+    hc := g.HasOwnProp("_heatmapColors") ? g._heatmapColors : GetDefaultHeatmapColors()
+
+    progressFn := (done, total_) => (
+        g["ProgressBar"].Value := Round(done / total_ * 100),
+        g["StatusText"].Value := "Refreshing " fileName " (" done "/" total_ ")"
+    )
+    refreshImageStart := A_TickCount
+    result := ProcessPaintCheck(pBitmap, alphaThreshold, NormalizeHexColor(g["FillColor"].Value), progressFn, hc)
+    imageDuration := A_TickCount - refreshImageStart
+    if !result {
+        GDI.DisposeImage(pBitmap)
+        MsgBox("Processing failed.", "Refresh Error", 48)
+        return
+    }
+
+    result.fileName := fileName
+    result.fullPath := file
+    result.nameOnly := nameOnly
+    result.inputExt := inputExt
+    result.report := GenerateReport(result, fileName)
+    result.settings := CaptureUiSettings(g)
+    result.durationMs := imageDuration
+
+    pThumb := GDI.CreateThumbnail(pBitmap, 360, 170)
+    result.origPreviewFile := pThumb ? GDI.SaveToBmpFile(pThumb) : GDI.SaveToBmpFile(pBitmap)
+    GDI.DisposeImage(pThumb)
+
+    g._results.Push(result)
+    GDI.DisposeImage(pBitmap)
+    LoadAndShowFile(g, idx)
+    ClearPendingRefresh(g)
+    g["ProgressBar"].Value := 100
+    g["StatusText"].Value := "Refresh complete. " fileName " (" FormatDuration(imageDuration) ")"
 }
 
 SaveOutputs(g, result, outputBase, nameOnly, srcBitmap := 0) {
     basePath := outputBase "\" nameOnly
-    settings := (g.HasOwnProp("_settingsScope") && g._settingsScope = "Current image"
-        && result.HasOwnProp("settings") && result.settings)
-        ? result.settings : CaptureUiSettings(g)
-
+    ext := result.HasOwnProp("inputExt") && result.inputExt ? result.inputExt : "png"
+    settings := CaptureUiSettings(g)
     if settings.saveFill {
-        filledPath := basePath "_filled.png"
-        GDI.SaveBitmap(result.filled, filledPath, "image/png")
+        filledPath := basePath "_filled." ext
+        GDI.SaveWithFormat(result.filled, filledPath, ext)
     }
 
     if settings.saveHeatmap {
-        heatPath := basePath "_heatmap.png"
-        GDI.SaveBitmap(result.heatmap, heatPath, "image/png")
+        heatPath := basePath "_heatmap." ext
+        GDI.SaveWithFormat(result.heatmap, heatPath, ext)
     }
 
     if settings.saveOverlay {
-        overlayPath := basePath "_overlay.png"
+        overlayPath := basePath "_overlay." ext
         pOverlay := ComposeOverlayBitmap(settings, result, "", srcBitmap)
         if pOverlay {
-            GDI.SaveBitmap(pOverlay, overlayPath, "image/png")
+            GDI.SaveWithFormat(pOverlay, overlayPath, ext)
             GDI.DisposeImage(pOverlay)
         }
     }
@@ -1919,10 +2301,7 @@ SaveAllSelected(g, dlg) {
 
 SaveOutputsSelected(g, result, outputBase, nameOnly, saveFill, saveHeatmap, saveOverlay, saveReport) {
     basePath := outputBase "\" nameOnly
-    settings := (g.HasOwnProp("_settingsScope") && g._settingsScope = "Current image"
-        && result.HasOwnProp("settings") && result.settings)
-        ? result.settings : CaptureUiSettings(g)
-
+    settings := CaptureUiSettings(g)
     if saveFill {
         filledPath := basePath "_filled.png"
         GDI.SaveBitmap(result.filled, filledPath, "image/png")
@@ -1986,7 +2365,7 @@ ResetSettings(g, *) {
         g["HeatmapOpacity"].Value := 35
         g["HeatmapOpacityVal"].Text := "35%"
         SyncFillColorUi(g, "#FF00FF")
-        g["FillOnTop"].Value := 1
+        g["FillOnTop"].Value := 0
         g["SaveFill"].Value := 0
         g["SaveHeatmap"].Value := 0
         g["SaveOverlay"].Value := 1
@@ -1997,9 +2376,9 @@ ResetSettings(g, *) {
         g["ShowHeatmap"].Value := 1
         g["ShowOrig"].Value := 1
         g["ShowFill"].Value := 1
-        g["SettingsScope"].Choose(1)
-        g._settingsScope := "All images"
+        g._heatmapColors := GetDefaultHeatmapColors()
         g._defaultSettings := CaptureUiSettings(g)
+        UpdateMainGradient(g)
         g["NavInfo"].Value := "No image selected"
         g["NavTimer"].Value := ""
         g["StatusText"].Value := "Settings reset to defaults."
@@ -2012,9 +2391,7 @@ ShowPreview(g, result) {
     g["ReportText"].Value := result.report
 
     ; Create thumbnail for filled, heatmap, overlay
-    settings := (g.HasOwnProp("_settingsScope") && g._settingsScope = "Current image"
-        && result.HasOwnProp("settings") && result.settings)
-        ? result.settings : CaptureUiSettings(g)
+    settings := CaptureUiSettings(g)
     g["FillLabel"].Value := "Filled (" NormalizeHexColor(settings.fillColor) ")"
     fillDisp := GetDisplayBitmap(g, result, "fill", "", settings)
     overlayDisp := GetDisplayBitmap(g, result, "overlay", "", settings)
@@ -2085,9 +2462,7 @@ ShowZoomWindow(g, which) {
         return
     }
 
-    zoomSettings := (g.HasOwnProp("_settingsScope") && g._settingsScope = "Current image"
-        && IsObject(result) && result.HasOwnProp("settings") && result.settings)
-        ? result.settings : CaptureUiSettings(g)
+    zoomSettings := CaptureUiSettings(g)
     disp := GetDisplayBitmap(g, result, which, filePath, zoomSettings)
     pBitmap := disp.bmp
     isExternal := disp.owned
@@ -2106,8 +2481,10 @@ ShowZoomWindow(g, which) {
     btnIn := zw.AddButton("x48 y4 w24 h20 cFFFFFF Background3A3C42", "+")
     btnOut := zw.AddButton("x74 y4 w24 h20 cFFFFFF Background3A3C42", "-")
     btnFit := zw.AddButton("x100 y4 w30 h20 cFFFFFF Background3A3C42", "Fit")
-    zt := zw.AddText("x135 y6 cFFFFFF w50 vZText", "100%")
-    modeText := zw.AddText("x190 y6 c555555 w470 vZMode"
+    zt := zw.AddText("x135 y6 cFFFFFF w30 vZText", "100%")
+    zw.AddButton("x172 y4 w55 h20 cFFFFFF Background3A3C42", "Refresh")
+        .OnEvent("Click", _ZoomRefresh.Bind(zw))
+    modeText := zw.AddText("x238 y6 cAAAAAA w470 vZMode"
         , GetZoomViewLabel(which) " | " origW "x" origH " | wheel zoom, drag pan")
 
     zw.AddText("x8 y30 cAAAAAA", "Compare:")
@@ -2120,7 +2497,7 @@ ShowZoomWindow(g, which) {
     for target in compareTargets {
         cmpBtn := zw.AddButton("x" cmpX " y28 w64 h20 cFFFFFF Background3A3C42"
             , GetZoomViewLabel(target))
-        cmpBtn.OnEvent("Click", (*) => _ZoomSetCompare(zw, target))
+        cmpBtn.OnEvent("Click", _ZoomSetCompare.Bind(zw, target))
         zw._compareButtons[target] := cmpBtn
         cmpX += 69
     }
@@ -2225,7 +2602,7 @@ _WheelZoom(zw, wParam, lParam, msg, hwnd) {
         _ZoomOut(zw)
 }
 
-_ZoomSetCompare(zw, compareWhich) {
+_ZoomSetCompare(zw, compareWhich, *) {
     if !zw.HasOwnProp("_g") || !zw.HasOwnProp("_sourceResult")
         return
     if zw.HasOwnProp("_compareOwned") && zw._compareOwned && zw.HasOwnProp("_compareBitmap") && zw._compareBitmap {
@@ -2290,6 +2667,56 @@ _ZoomClose(zw) {
         GDI.DisposeImage(zw._compareBitmap)
     if zw.HasOwnProp("_g") && zw._g.HasOwnProp("_zoomWindow")
         zw._g._zoomWindow := 0
+}
+
+_ZoomRefresh(zw, *) {
+    g := zw._g
+    which := zw._baseWhich
+    if !g.HasOwnProp("_currentIndex")
+        return
+    idx := g._currentIndex
+    if idx < 1 || idx > g._files.Length
+        return
+    filePath := g._files[idx]
+    SplitPath(filePath, &fileName)
+
+    result := 0
+    for r in g._results {
+        if ResultMatchesFile(r, filePath) {
+            result := r
+            break
+        }
+    }
+
+    zoomSettings := CaptureUiSettings(g)
+    disp := GetDisplayBitmap(g, result, which, filePath, zoomSettings)
+    if !disp.bmp
+        return
+    dims := GDI.GetDimensions(disp.bmp)
+    if !dims.w || !dims.h {
+        if disp.owned
+            GDI.DisposeImage(disp.bmp)
+        return
+    }
+
+    if zw._isExt && zw._pBitmap
+        GDI.DisposeImage(zw._pBitmap)
+    zw._pBitmap := disp.bmp
+    zw._isExt := disp.owned
+    zw._origW := dims.w
+    zw._origH := dims.h
+    zw._imgX := 0
+    zw._imgY := 0
+
+    if zw.HasOwnProp("_compareOwned") && zw._compareOwned && zw.HasOwnProp("_compareBitmap") && zw._compareBitmap {
+        GDI.DisposeImage(zw._compareBitmap)
+    }
+    zw._compareBitmap := 0
+    zw._compareOwned := false
+    zw._compareWhich := ""
+
+    try zw.Title := "Zoom View [" GetZoomViewLabel(which) "] - " fileName
+    _ZoomApply(zw, zw._zoomLevel)
 }
 
 _RenderZoom(zw, pBitmap, ow, oh, zl, zt) {
@@ -2458,8 +2885,8 @@ ShowGuide(g, *) {
         . "1. Transparent pixels are filled with the chosen hex color.`n"
         . "2. Non-transparent areas become transparent in filled output.`n"
         . "3. Overlay shows the original image, then heatmap at the chosen opacity, then fill markers.`n"
-        . "4. Heatmap shows red for transparent areas with a`n"
-        . "   yellow -> green -> blue edge falloff (5 px bands).`n"
+        . "4. Heatmap uses a customizable 7-color gradient (fill/edge1-5/far)`n"
+        . "   to visualize transparency density with edge falloff bands.`n"
         . "5. A text report gives exact coordinates and cluster analysis.`n"
         . "6. Alpha Threshold slider (0-255) controls transparency`n"
         . "   sensitivity: 128 marks pixels with alpha < 128 as`n"
@@ -2490,12 +2917,14 @@ ShowGuide(g, *) {
         . "- Save Outputs defaults to Overlay only; turn on others if needed`n"
         . "- Save All opens a checkbox dialog so you can choose what to save for every processed image`n"
         . "- Save All can also open the output folder after saving`n"
-        . "- File info is always shown below the previews`n"
-        . "- Settings Scope switches between applying changes to all images or the current image`n"
+        .         "- File info is always shown below the previews`n"
+        . "- Heatmap Colors opens a dialog with 7 color inputs, live swatches, 10 presets, and gradient preview`n"
+        . "- Refresh button turns orange ('Apply!') when settings change; click to reprocess current image`n"
+        . "- Refresh shows a progress bar, per-image timing, and status updates`n"
         . "- Double-click any preview to open a zoomable full-view window with compare mode`n"
         . "- Check 'Export as ZIP' to bundle all outputs into a single archive")
 
-    guide.Show("w460 h685")
+    guide.Show("w460 h750")
 }
 
 ; ===================================================================

@@ -1,8 +1,6 @@
 # 🎨 Nastarxa Paint Checker
 
-(Useable but still need some feature and bug fixing, output still only png even when input is tga. make sure fill on top checked for now)
-
-Detect transparent (alpha) pixels in images and generate visual markers, heatmaps, overlays, and detailed analysis reports.
+Detect transparent (alpha) pixels in images and generate visual markers, heatmaps, overlays, and detailed analysis reports with a fully customizable heatmap color gradient.
 
 Perfect for checking paint gaps, transparency leaks, missing fills, export mistakes, and cleanup issues in animation, game assets, sprites, illustrations, and texture workflows.
 
@@ -37,11 +35,14 @@ Generate a transparency mask using a custom fill color.
 
 ### 🌡️ Heatmap Output
 
-Visualize transparency density using a color gradient:
+Visualize transparency density using a customizable 7-color gradient (fill, edge1–5, far):
 
-```text
-Red → Yellow → Green → Blue
-```
+- Click **Heatmap Colors** to open the color editor
+- 10 built-in presets (Default, Hot, Cool, Rainbow, Monochrome, Fire, Ocean, Sunset, Forest, Plasma)
+- Live-editable hex color inputs with real-time swatches
+- Gradient preview bar in both the dialog and main GUI
+
+The gradient bar also appears in the main GUI above the Heatmap Colors button, updating live when you save changes.
 
 ### 🖼️ Overlay Output
 
@@ -93,11 +94,17 @@ Optional ZIP export is also available.
 
 ### ⏱️ Progress Tracking
 
-Large batches include:
+Batch processing includes:
 
-* Progress bar
-* Current file information
-* Estimated remaining time (ETA)
+* Progress bar with per-file sub-progress
+* Current file information and ETA
+* Per-image processing time display
+
+Single-image **Refresh** also shows:
+
+* Progress bar during processing
+* Image processing duration on completion
+* Status notifications and dirty-state indicator (orange "Apply!" button)
 
 ### 🚀 No External Dependencies
 
@@ -142,10 +149,11 @@ TGA
 1. Launch Nastarxa Paint Checker.
 2. Drop image files or folders into the window.
 3. Adjust Alpha Threshold if needed.
-4. Select which outputs to generate.
-5. Click **Start**.
-6. Review previews and analysis results.
-7. Save outputs individually or export as ZIP.
+4. Customize fill color (right column) and heatmap gradient (center column) if desired.
+5. Select which outputs to generate (left column).
+6. Click **Start** to batch process, or **Refresh** (turns orange when settings change) for the current image.
+7. Review previews and analysis results.
+8. Save outputs individually or export as ZIP.
 
 ---
 
