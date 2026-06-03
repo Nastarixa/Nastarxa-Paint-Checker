@@ -2708,12 +2708,19 @@ _ZoomRefresh(zw, *) {
     zw._imgX := 0
     zw._imgY := 0
 
+    ; Re-load compare bitmap to preserve compare mode across refresh
     if zw.HasOwnProp("_compareOwned") && zw._compareOwned && zw.HasOwnProp("_compareBitmap") && zw._compareBitmap {
         GDI.DisposeImage(zw._compareBitmap)
     }
     zw._compareBitmap := 0
     zw._compareOwned := false
-    zw._compareWhich := ""
+    if zw.HasOwnProp("_compareWhich") && zw._compareWhich {
+        cmpDisp := GetDisplayBitmap(zw._g, result, zw._compareWhich, filePath, zoomSettings)
+        if cmpDisp.bmp {
+            zw._compareBitmap := cmpDisp.bmp
+            zw._compareOwned := cmpDisp.owned
+        }
+    }
 
     try zw.Title := "Zoom View [" GetZoomViewLabel(which) "] - " fileName
     _ZoomApply(zw, zw._zoomLevel)
