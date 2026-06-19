@@ -153,14 +153,14 @@ class GDI {
         return pBitmap
     }
 
-    static DrawBitmap(pDest, pSrc, dstX, dstY, dstW, dstH, srcX, srcY, srcW, srcH) {
+    static DrawBitmap(pDest, pSrc, dstX, dstY, dstW, dstH, srcX, srcY, srcW, srcH, interpMode := 7) {
         if !pDest || !pSrc
             return false
         gfx := 0
         try {
             if DllCall("gdiplus\GdipGetImageGraphicsContext", "Ptr", pDest, "Ptr*", &gfx)
                 return false
-            DllCall("gdiplus\GdipSetInterpolationMode", "Ptr", gfx, "Int", 7)
+            DllCall("gdiplus\GdipSetInterpolationMode", "Ptr", gfx, "Int", interpMode)
             status := DllCall("gdiplus\GdipDrawImageRectRect", "Ptr", gfx, "Ptr", pSrc
                 , "Float", dstX, "Float", dstY, "Float", dstW, "Float", dstH
                 , "Float", srcX, "Float", srcY, "Float", srcW, "Float", srcH
@@ -211,7 +211,7 @@ class GDI {
         return ""
     }
 
-    static CreateThumbnail(pBitmap, maxW, maxH, bgColor := 0xFF23262C) {
+    static CreateThumbnail(pBitmap, maxW, maxH, bgColor := 0xFF23262C, fastMode := false) {
         if !pBitmap
             return 0
         dims := this.GetDimensions(pBitmap)
@@ -235,7 +235,8 @@ class GDI {
                     , "Float", maxW, "Float", maxH)
                 DllCall("gdiplus\GdipDeleteBrush", "Ptr", brush)
             }
-            DllCall("gdiplus\GdipSetInterpolationMode", "Ptr", gfx, "Int", 7)
+            interpMode := fastMode ? 5 : 7
+            DllCall("gdiplus\GdipSetInterpolationMode", "Ptr", gfx, "Int", interpMode)
             DllCall("gdiplus\GdipDrawImageRectRect", "Ptr", gfx, "Ptr", pBitmap
                 , "Float", fit.x, "Float", fit.y
                 , "Float", fit.w, "Float", fit.h
@@ -738,14 +739,16 @@ ParseColorArgb(text) {
 ; ===================================================================
 ; Image Processing - Paint Checker
 ; ===================================================================
-ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progressCb := 0, heatmapColors := 0) {
+ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progressCb := 0, heatmapColors := 0, sourceExt := "", fastMode := false) {
     dims := GDI.GetDimensions(pBitmap)
     w := dims.w, h := dims.h
+    totalPixels := w * h
+    skipClusterAnalysis := fastMode || (sourceExt = "tga") || (totalPixels >= 4000000)
 
     pFilled := GDI.CreateBitmap(w, h)
-    pHeatmap := GDI.CreateBitmap(w, h)
+    pHeatmap := fastMode ? 0 : GDI.CreateBitmap(w, h)
 
-    if !pFilled || !pHeatmap
+    if !pFilled || (!fastMode && !pHeatmap)
         return 0
 
     fillArgb := HexColorToArgb(fillColor)
@@ -773,12 +776,14 @@ ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progre
     fillScan0 := NumGet(fillBd, 16, "UPtr")
     fillStride := NumGet(fillBd, 8, "Int")
 
-    ; Lock heatmap bitmap for writing
-    heatBd := Buffer(bdSize, 0)
-    DllCall("gdiplus\GdipBitmapLockBits", "Ptr", pHeatmap, "Ptr", Rect
-        , "UInt", 2, "Int", 0x26200A, "Ptr", heatBd)
-    heatScan0 := NumGet(heatBd, 16, "UPtr")
-    heatStride := NumGet(heatBd, 8, "Int")
+    if !fastMode {
+        ; Lock heatmap bitmap for writing
+        heatBd := Buffer(bdSize, 0)
+        DllCall("gdiplus\GdipBitmapLockBits", "Ptr", pHeatmap, "Ptr", Rect
+            , "UInt", 2, "Int", 0x26200A, "Ptr", heatBd)
+        heatScan0 := NumGet(heatBd, 16, "UPtr")
+        heatStride := NumGet(heatBd, 8, "Int")
+    }
 
     ; Resolve heatmap colors before first pass (used by both loops)
     hc := IsObject(heatmapColors) && heatmapColors.HasOwnProp("fill") ? heatmapColors : GetDefaultHeatmapColors()
@@ -786,9 +791,9 @@ ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progre
     edgeArr := [0, hc.edge1, hc.edge2, hc.edge3, hc.edge4, hc.edge5]
     farColor := hc.far
 
-    ; Allocate distance buffer for edge gradient
+    ; Allocate distance buffer for edge gradient when heatmap is enabled
     maxEdgeDist := 5
-    distBuf := Buffer(w * h, 0xFF)
+    distBuf := fastMode ? 0 : Buffer(w * h, 0xFF)
 
     ; Process all pixels via direct memory access
     loop h {
@@ -797,7 +802,6 @@ ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progre
             x := A_Index - 1
             srcOff := y * srcStride + x * 4
             fillOff := y * fillStride + x * 4
-            heatOff := y * heatStride + x * 4
 
             a := NumGet(srcScan0, srcOff + 3, "UChar")
 
@@ -827,11 +831,14 @@ ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progre
                 else
                     alphaBuckets[5]++
 
-                ; Heatmap: configurable color for transparent pixels
-                NumPut("UInt", transColor, heatScan0, heatOff)
+                if !fastMode {
+                    heatOff := y * heatStride + x * 4
+                    ; Heatmap: configurable color for transparent pixels
+                    NumPut("UInt", transColor, heatScan0, heatOff)
 
-                ; Distance 0 (transparent pixel)
-                NumPut("UChar", 0, distBuf, y * w + x)
+                    ; Distance 0 (transparent pixel)
+                    NumPut("UChar", 0, distBuf, y * w + x)
+                }
 
             } else {
                 ; Filled: fully transparent (no marker)
@@ -845,54 +852,55 @@ ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progre
             progressCb.Call(y + 1, h)
     }
 
-    ; Distance transform (multi-pass dilation)
-    loop maxEdgeDist {
-        d := A_Index
-        y := 0
-        while y < h {
-            yy := y
-            x := 0
-            while x < w {
-                off := yy * w + x
-                val := NumGet(distBuf, off, "UChar")
-                if val != 255 {
+    if !fastMode {
+        ; Distance transform (multi-pass dilation)
+        loop maxEdgeDist {
+            d := A_Index
+            y := 0
+            while y < h {
+                yy := y
+                x := 0
+                while x < w {
+                    off := yy * w + x
+                    val := NumGet(distBuf, off, "UChar")
+                    if val != 255 {
+                        x++
+                        continue
+                    }
+                    if (yy > 0 && NumGet(distBuf, (yy - 1) * w + x, "UChar") = d - 1)
+                        or (yy < h - 1 && NumGet(distBuf, (yy + 1) * w + x, "UChar") = d - 1)
+                        or (x > 0 && NumGet(distBuf, yy * w + x - 1, "UChar") = d - 1)
+                        or (x < w - 1 && NumGet(distBuf, yy * w + x + 1, "UChar") = d - 1)
+                            NumPut("UChar", d, distBuf, off)
                     x++
-                    continue
                 }
-                if (yy > 0 && NumGet(distBuf, (yy - 1) * w + x, "UChar") = d - 1)
-                    or (yy < h - 1 && NumGet(distBuf, (yy + 1) * w + x, "UChar") = d - 1)
-                    or (x > 0 && NumGet(distBuf, yy * w + x - 1, "UChar") = d - 1)
-                    or (x < w - 1 && NumGet(distBuf, yy * w + x + 1, "UChar") = d - 1)
-                        NumPut("UChar", d, distBuf, off)
-                x++
+                y++
             }
-            y++
         }
-    }
 
-    loop h {
-        y := A_Index - 1
-        loop w {
-            x := A_Index - 1
-            off := y * w + x
-            heatOff := y * heatStride + x * 4
-            val := NumGet(distBuf, off, "UChar")
+        loop h {
+            y := A_Index - 1
+            loop w {
+                x := A_Index - 1
+                off := y * w + x
+                heatOff := y * heatStride + x * 4
+                val := NumGet(distBuf, off, "UChar")
 
-            if val = 0
-                continue
+                if val = 0
+                    continue
 
-            NumPut("UInt", val <= maxEdgeDist ? edgeArr[val] : farColor, heatScan0, heatOff)
+                NumPut("UInt", val <= maxEdgeDist ? edgeArr[val] : farColor, heatScan0, heatOff)
+            }
         }
     }
 
     ; Unlock all bitmaps
     DllCall("gdiplus\GdipBitmapUnlockBits", "Ptr", pBitmap, "Ptr", srcBd)
     DllCall("gdiplus\GdipBitmapUnlockBits", "Ptr", pFilled, "Ptr", fillBd)
-    DllCall("gdiplus\GdipBitmapUnlockBits", "Ptr", pHeatmap, "Ptr", heatBd)
+    if !fastMode
+        DllCall("gdiplus\GdipBitmapUnlockBits", "Ptr", pHeatmap, "Ptr", heatBd)
 
-    clusters := transparentPixels > 0 ? FindTransparentClusters(pBitmap, w, h, alphaThreshold) : []
-
-    totalPixels := w * h
+    clusters := transparentPixels > 0 && !skipClusterAnalysis ? FindTransparentClusters(pBitmap, w, h, alphaThreshold) : []
     transparentPercent := Round(transparentPixels / totalPixels * 100, 2)
 
     result := {
@@ -906,7 +914,9 @@ ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progre
         minX: minX, minY: minY, maxX: maxX, maxY: maxY,
         hasTransparency: transparentPixels > 0,
         clusters: clusters,
-        alphaBuckets: alphaBuckets
+        alphaBuckets: alphaBuckets,
+        clusterAnalysisSkipped: skipClusterAnalysis,
+        fastMode: fastMode
     }
 
     return result
@@ -1056,6 +1066,12 @@ GenerateReport(result, inputFile := "") {
     report .= "Lightly transparent (alpha 77-102): " result.alphaBuckets[4] " px`n"
     report .= "Barely transparent (alpha 103-127): " result.alphaBuckets[5] " px`n`n"
 
+    if result.HasOwnProp("clusterAnalysisSkipped") && result.clusterAnalysisSkipped {
+        report .= "--- Clusters (Connected Components) ---`n"
+        report .= "Cluster analysis skipped for this large image to keep processing responsive.`n"
+        return report
+    }
+
     report .= "--- Clusters (Connected Components) ---`n"
     report .= "Total clusters found: " result.clusters.Length "`n`n"
 
@@ -1089,6 +1105,7 @@ BuildGui() {
     g._results := []
     g._currentIndex := 0
     g._defaultSettings := 0
+    ApplyStartupInput(g)
 
     g.Show("w1160 h917")
     SyncFillColorUi(g, g["FillColor"].Value)
@@ -1124,6 +1141,9 @@ AddInputPanel(g) {
     g.AddCheckBox("x25 y180 Checked vMakeFolder cCFCFCF", "Create Output Folder")
     g.AddCheckBox("x180 y180 vRecursive cCFCFCF", "Include Subfolders")
     g.AddCheckBox("x320 y180 vZipExport cCFCFCF", "Export Outputs as ZIP")
+    g.AddCheckBox("x470 y180 vFastMode cCFCFCF", "Fast Mode")
+    g.AddButton("x548 y179 w72 h18 cFFFFFF Background3A3C42", "? Fast Mode")
+        .OnEvent("Click", ShowFastModeInfo.Bind(g))
 
     ; ==========================================================
     ; LEFT: SAVE OUTPUTS
@@ -1295,6 +1315,7 @@ CaptureUiSettings(g) {
         heatmapOpacity: g["HeatmapOpacity"].Value,
         fillColor: NormalizeHexColor(g["FillColor"].Value),
         fillOnTop: g["FillOnTop"].Value,
+        fastMode: g["FastMode"].Value,
         saveFill: g["SaveFill"].Value,
         saveHeatmap: g["SaveHeatmap"].Value,
         saveOverlay: g["SaveOverlay"].Value,
@@ -1329,6 +1350,8 @@ ApplyUiSettings(g, settings) {
             SyncFillColorUi(g, settings.fillColor)
         if settings.HasOwnProp("fillOnTop")
             g["FillOnTop"].Value := settings.fillOnTop
+        if settings.HasOwnProp("fastMode")
+            g["FastMode"].Value := settings.fastMode
         if settings.HasOwnProp("saveFill")
             g["SaveFill"].Value := settings.saveFill
         if settings.HasOwnProp("saveHeatmap")
@@ -1372,7 +1395,7 @@ GetActiveResult(g) {
 }
 
 WireSettingEvents(g) {
-    for _, name in ["SaveFill", "SaveHeatmap", "SaveOverlay", "SaveReport"
+    for _, name in ["FastMode", "SaveFill", "SaveHeatmap", "SaveOverlay", "SaveReport"
         , "ZipExport", "MakeFolder", "Recursive", "WhiteInclude"
         , "ShowHeatmap", "ShowOrig", "ShowFill", "FillOnTop"] {
         g[name].OnEvent("Click", (*) => OnSettingChanged(g))
@@ -1737,6 +1760,43 @@ UpdateDefaultOutputPath(g) {
         g["OutputPath"].Value := parentDir
 }
 
+ApplyStartupInput(g) {
+    if (A_Args.Length = 0)
+        return
+
+    inputArg := ""
+    shouldStart := false
+    for _, item in A_Args {
+        trimmed := Trim(item)
+        if (trimmed = "")
+            continue
+        if RegExMatch(trimmed, 'i)^--?input-folder=(.+)$', &m) {
+            inputArg := Trim(m[1], '"')
+            continue
+        }
+        if (StrLower(trimmed) = "--start-checker" || StrLower(trimmed) = "--start-processing")
+            shouldStart := true
+    }
+
+    if (inputArg = "")
+        return
+
+    if DirExist(inputArg) {
+        g["InputPath"].Value := inputArg
+        UpdateDefaultOutputPath(g)
+        ScanFolder(g, inputArg)
+    } else if FileExist(inputArg) {
+        g["InputPath"].Value := inputArg
+        UpdateDefaultOutputPath(g)
+        g._files := [inputArg]
+    }
+
+    if shouldStart {
+        g._autoStart := true
+        SetTimer(() => StartProcessing(g), -100)
+    }
+}
+
 BrowseOutput(g, *) {
     g.Opt("+OwnDialogs")
     folder := FileSelect("D", "", "Select output folder")
@@ -1914,17 +1974,21 @@ LoadAndShowFile(g, idx) {
     if g._defaultSettings
         ApplyUiSettings(g, g._defaultSettings)
 
-    ; Create thumbnail and show original preview (no stretch)
-    pThumb := GDI.CreateThumbnail(pOrig, 360, 170)
-    origBmp := ""
-    if pThumb {
-        origBmp := GDI.SaveToBmpFile(pThumb)
-        GDI.DisposeImage(pThumb)
+    ; In Fast Mode, skip preview thumbnail generation to save time.
+    if !g["FastMode"].Value {
+        pThumb := GDI.CreateThumbnail(pOrig, 360, 170, 0xFF23262C, false)
+        origBmp := ""
+        if pThumb {
+            origBmp := GDI.SaveToBmpFile(pThumb)
+            GDI.DisposeImage(pThumb)
+        } else {
+            origBmp := GDI.SaveToBmpFile(pOrig)
+        }
+        if origBmp && FileExist(origBmp)
+            g["OrigPreview"].Value := origBmp
     } else {
-        origBmp := GDI.SaveToBmpFile(pOrig)
+        g["OrigPreview"].Value := ""
     }
-    if origBmp && FileExist(origBmp)
-        g["OrigPreview"].Value := origBmp
     GDI.DisposeImage(pOrig)
 
     ; Check if processed result exists
@@ -2038,13 +2102,17 @@ StartProcessing(g, *) {
         )
 
         ; Save thumbnail preview (not full-size) to avoid stretching in picture control
-        pThumb := GDI.CreateThumbnail(pBitmap, 360, 170)
-        origPreviewFile := pThumb ? GDI.SaveToBmpFile(pThumb) : GDI.SaveToBmpFile(pBitmap)
-        GDI.DisposeImage(pThumb)
+        if g["FastMode"].Value {
+            origPreviewFile := ""
+        } else {
+            pThumb := GDI.CreateThumbnail(pBitmap, 360, 170, 0xFF23262C, false)
+            origPreviewFile := pThumb ? GDI.SaveToBmpFile(pThumb) : GDI.SaveToBmpFile(pBitmap)
+            GDI.DisposeImage(pThumb)
+        }
         log .= "  preview: " (origPreviewFile ? "OK" : "FAILED") "`n"
 
         hc := g.HasOwnProp("_heatmapColors") ? g._heatmapColors : GetDefaultHeatmapColors()
-        result := ProcessPaintCheck(pBitmap, alphaThreshold, NormalizeHexColor(g["FillColor"].Value), progressFn, hc)
+        result := ProcessPaintCheck(pBitmap, alphaThreshold, NormalizeHexColor(g["FillColor"].Value), progressFn, hc, inputExt, g["FastMode"].Value)
 
         if !result {
             GDI.DisposeImage(pBitmap)
@@ -2086,9 +2154,6 @@ StartProcessing(g, *) {
         log .= " (" failed.Length " failed)"
     log .= "`nOutput: " outputBase "`n"
 
-    ; Write log to report
-    g["ReportText"].Value := log
-
     ; Create ZIP if checkbox is checked
     zipCreated := ""
     if g["ZipExport"].Value {
@@ -2098,6 +2163,11 @@ StartProcessing(g, *) {
         else
             log .= "ZIP creation failed`n"
     }
+
+    ; Write log to report
+    g["ReportText"].Value := log
+
+    WriteSequencerReview(g, outputBase, processed, failed, totalDurStr, zipCreated, log)
 
     if failed.Length > 0 {
         failList := ""
@@ -2166,7 +2236,7 @@ ReprocessCurrent(g, *) {
         g["StatusText"].Value := "Refreshing " fileName " (" done "/" total_ ")"
     )
     refreshImageStart := A_TickCount
-    result := ProcessPaintCheck(pBitmap, alphaThreshold, NormalizeHexColor(g["FillColor"].Value), progressFn, hc)
+    result := ProcessPaintCheck(pBitmap, alphaThreshold, NormalizeHexColor(g["FillColor"].Value), progressFn, hc, inputExt, g["FastMode"].Value)
     imageDuration := A_TickCount - refreshImageStart
     if !result {
         GDI.DisposeImage(pBitmap)
@@ -2182,9 +2252,13 @@ ReprocessCurrent(g, *) {
     result.settings := CaptureUiSettings(g)
     result.durationMs := imageDuration
 
-    pThumb := GDI.CreateThumbnail(pBitmap, 360, 170)
-    result.origPreviewFile := pThumb ? GDI.SaveToBmpFile(pThumb) : GDI.SaveToBmpFile(pBitmap)
-    GDI.DisposeImage(pThumb)
+    if g["FastMode"].Value {
+        result.origPreviewFile := ""
+    } else {
+        pThumb := GDI.CreateThumbnail(pBitmap, 360, 170, 0xFF23262C, false)
+        result.origPreviewFile := pThumb ? GDI.SaveToBmpFile(pThumb) : GDI.SaveToBmpFile(pBitmap)
+        GDI.DisposeImage(pThumb)
+    }
 
     g._results.Push(result)
     GDI.DisposeImage(pBitmap)
@@ -2196,23 +2270,40 @@ ReprocessCurrent(g, *) {
 
 SaveOutputs(g, result, outputBase, nameOnly, srcBitmap := 0) {
     basePath := outputBase "\" nameOnly
-    ext := result.HasOwnProp("inputExt") && result.inputExt ? result.inputExt : "png"
     settings := CaptureUiSettings(g)
+    inputExt := result.HasOwnProp("inputExt") && result.inputExt ? result.inputExt : "png"
+    ext := settings.fastMode ? "png" : inputExt
+    if settings.fastMode {
+        settings.saveFill := 1
+        settings.saveHeatmap := 0
+        settings.saveOverlay := 0
+        settings.saveReport := 0
+        settings.zipExport := 0
+    }
     if settings.saveFill {
         filledPath := basePath "_filled." ext
-        GDI.SaveWithFormat(result.filled, filledPath, ext)
+        if ext = "png"
+            GDI.SaveBitmap(result.filled, filledPath, "image/png")
+        else
+            GDI.SaveWithFormat(result.filled, filledPath, ext)
     }
 
     if settings.saveHeatmap {
         heatPath := basePath "_heatmap." ext
-        GDI.SaveWithFormat(result.heatmap, heatPath, ext)
+        if ext = "png"
+            GDI.SaveBitmap(result.heatmap, heatPath, "image/png")
+        else
+            GDI.SaveWithFormat(result.heatmap, heatPath, ext)
     }
 
     if settings.saveOverlay {
         overlayPath := basePath "_overlay." ext
         pOverlay := ComposeOverlayBitmap(settings, result, "", srcBitmap)
         if pOverlay {
-            GDI.SaveWithFormat(pOverlay, overlayPath, ext)
+            if ext = "png"
+                GDI.SaveBitmap(pOverlay, overlayPath, "image/png")
+            else
+                GDI.SaveWithFormat(pOverlay, overlayPath, ext)
             GDI.DisposeImage(pOverlay)
         }
     }
@@ -2222,6 +2313,121 @@ SaveOutputs(g, result, outputBase, nameOnly, srcBitmap := 0) {
         try FileDelete(reportPath)
         FileAppend(result.report, reportPath)
     }
+}
+
+JsonEscape(value) {
+    text := value ""
+    text := StrReplace(text, "\", "\\")
+    text := StrReplace(text, '"', '\"')
+    text := StrReplace(text, "`r", "\r")
+    text := StrReplace(text, "`n", "\n")
+    text := StrReplace(text, "`t", "\t")
+    return text
+}
+
+JsonStringify(value) {
+    if IsObject(value) {
+        if value is Array {
+            parts := []
+            for _, item in value
+                parts.Push(JsonStringify(item))
+            return "[" StrJoin(parts, ",") "]"
+        }
+
+        parts := []
+        try {
+            for key, item in value
+                parts.Push('"' JsonEscape(key) '":' JsonStringify(item))
+            return "{" StrJoin(parts, ",") "}"
+        } catch {
+            ; Some AHK objects (Gui/COM/etc.) are not enumerable.
+            return "null"
+        }
+    }
+
+    if Type(value) = "String" {
+        return '"' JsonEscape(value) '"'
+    }
+    if Type(value) = "Integer" || Type(value) = "Float" {
+        return value
+    }
+    if Type(value) = "Boolean" {
+        return value ? "true" : "false"
+    }
+    if value = "" {
+        return '""'
+    }
+    return '"' JsonEscape(value) '"'
+}
+
+StrJoin(arr, delimiter := ",") {
+    result := ""
+    for index, item in arr
+        result .= (index = 1 ? "" : delimiter) item
+    return result
+}
+
+WriteSequencerReview(g, outputBase, processed, failed, totalDurStr, zipCreated := "", logText := "") {
+    if (outputBase = "")
+        return ""
+    if !DirExist(outputBase)
+        DirCreate(outputBase)
+
+    whiteIgnored := g["WhiteInclude"].Value ? 0 : 1
+    issueMessages := []
+    if failed.Length > 0 {
+        for _, fileName in failed
+            issueMessages.Push("Review needed: " fileName)
+    } else {
+        issueMessages.Push("No blocking issues detected.")
+    }
+    review := {
+        source_app: "Nastarxa Paint Checker",
+        source_version: "1.0",
+        generated_at: FormatTime(, "yyyy-MM-dd HH:mm:ss"),
+        input_path: g["InputPath"].Value,
+        output_folder: outputBase,
+        processed_count: processed,
+        failed_count: failed.Length,
+        status: failed.Length > 0 ? "needs_revision" : "ok",
+        summary: failed.Length > 0
+            ? "Processed " processed " file(s) with " failed.Length " issue(s)."
+            : "Processed " processed " file(s) with no blocking issues.",
+        problem_files: failed,
+        issue_messages: issueMessages,
+        recommendations: [
+            "Use the imported review notes in Paint Sequencer to fix the flagged files.",
+            "Keep outer transparent pixels ignored.",
+            "Keep pure white 255,255,255 outside the paint region unless you intentionally include white."
+        ],
+        background_rules: {
+            transparent_pixels_ignored: true,
+            white_pixels_ignored: whiteIgnored,
+            white_rgb: [255, 255, 255]
+        },
+        duration: totalDurStr,
+        zip_path: zipCreated,
+        log_excerpt: logText
+    }
+
+    jsonText := JsonStringify(review)
+    reviewPath := outputBase "\paint_checker_review.json"
+    try FileDelete(reviewPath)
+    FileAppend(jsonText, reviewPath, "UTF-8")
+
+    reviewTxt := outputBase "\paint_checker_review.txt"
+    try FileDelete(reviewTxt)
+    FileAppend(
+        "Nastarxa Paint Checker Review`r`n"
+        . "Status: " review.status "`r`n"
+        . "Summary: " review.summary "`r`n"
+        . "Problem files: " (failed.Length > 0 ? StrJoin(failed, ", ") : "none") "`r`n"
+        . "Recommendations:`r`n  - " StrJoin(review.recommendations, "`r`n  - ") "`r`n",
+        reviewTxt,
+        "UTF-8"
+    )
+
+    return reviewPath
 }
 
 CreateZipExport(outputBase) {
@@ -2302,6 +2508,12 @@ SaveAllSelected(g, dlg) {
 SaveOutputsSelected(g, result, outputBase, nameOnly, saveFill, saveHeatmap, saveOverlay, saveReport) {
     basePath := outputBase "\" nameOnly
     settings := CaptureUiSettings(g)
+    if settings.fastMode {
+        saveFill := true
+        saveHeatmap := false
+        saveOverlay := false
+        saveReport := false
+    }
     if saveFill {
         filledPath := basePath "_filled.png"
         GDI.SaveBitmap(result.filled, filledPath, "image/png")
@@ -2366,6 +2578,7 @@ ResetSettings(g, *) {
         g["HeatmapOpacityVal"].Text := "35%"
         SyncFillColorUi(g, "#FF00FF")
         g["FillOnTop"].Value := 0
+        g["FastMode"].Value := 0
         g["SaveFill"].Value := 0
         g["SaveHeatmap"].Value := 0
         g["SaveOverlay"].Value := 1
@@ -2394,10 +2607,18 @@ ShowPreview(g, result) {
     settings := CaptureUiSettings(g)
     g["FillLabel"].Value := "Filled (" NormalizeHexColor(settings.fillColor) ")"
     fillDisp := GetDisplayBitmap(g, result, "fill", "", settings)
-    overlayDisp := GetDisplayBitmap(g, result, "overlay", "", settings)
-    pFillThumb := fillDisp.bmp ? GDI.CreateThumbnail(fillDisp.bmp, 360, 170) : 0
-    pHumThumb := result.HasOwnProp("heatmap") && result.heatmap ? GDI.CreateThumbnail(result.heatmap, 360, 170) : 0
-    pOvThumb := overlayDisp.bmp ? GDI.CreateThumbnail(overlayDisp.bmp, 360, 170) : 0
+    fastMode := settings.HasOwnProp("fastMode") && settings.fastMode
+    if fastMode {
+        overlayDisp := {bmp: 0, owned: false}
+        pFillThumb := 0
+        pHumThumb := 0
+        pOvThumb := 0
+    } else {
+        overlayDisp := GetDisplayBitmap(g, result, "overlay", "", settings)
+        pFillThumb := fillDisp.bmp ? GDI.CreateThumbnail(fillDisp.bmp, 360, 170, 0xFF23262C, false) : 0
+        pHumThumb := result.HasOwnProp("heatmap") && result.heatmap ? GDI.CreateThumbnail(result.heatmap, 360, 170, 0xFF23262C, false) : 0
+        pOvThumb := overlayDisp.bmp ? GDI.CreateThumbnail(overlayDisp.bmp, 360, 170, 0xFF23262C, false) : 0
+    }
 
     fillFile := pFillThumb ? GDI.SaveToBmpFile(pFillThumb) : ""
     humFile := pHumThumb ? GDI.SaveToBmpFile(pHumThumb) : ""
@@ -2915,6 +3136,7 @@ ShowGuide(g, *) {
         . "- Drop a folder to batch process all images`n"
         . "- Check 'Create subfolder' to keep files organized`n"
         . "- Check 'Include subfolders' for recursive batch scanning`n"
+        . "- Use Fast Mode to skip heatmaps, overlays, clusters, and preview thumbnails for the quickest pass`n"
         . "- Adjust Alpha Threshold slider to control sensitivity`n"
         . "  (0 = all pixels treated transparent, 255 = only fully transparent treated)`n"
         . "- Heatmap / Original / Fill control which layers are blended into the overlay preview and export`n"
@@ -2932,6 +3154,30 @@ ShowGuide(g, *) {
         . "- Check 'Export as ZIP' to bundle all outputs into a single archive")
 
     guide.Show("w460 h750")
+}
+
+ShowFastModeInfo(g, *) {
+    dlg := Gui("+AlwaysOnTop +ToolWindow", "Fast Mode")
+    dlg.BackColor := "2B2D31"
+    dlg.SetFont("s10 w600", "Segoe UI")
+    dlg.AddText("x12 y10 cFFFFFF", "Fast Mode")
+    dlg.SetFont("s9 norm", "Segoe UI")
+    dlg.AddText("x12 y36 w390 h250 cD0D0D0",
+        "Fast Mode is a speed-first preset for large files.`n`n"
+        . "It changes the workflow like this:`n"
+        . "- Skips heatmap generation`n"
+        . "- Skips overlay generation`n"
+        . "- Skips cluster analysis`n"
+        . "- Skips preview thumbnail generation`n"
+        . "- Forces PNG output for faster writing`n`n"
+        . "You still get:`n"
+        . "- Filled output`n"
+        . "- Transparency counts and bounds`n"
+        . "- Pixel-accurate saved images with no anti-aliasing`n`n"
+        . "Use it when speed matters more than the extra diagnostic visuals.")
+    dlg.AddButton("x160 y304 w80 h26", "Close").OnEvent("Click", (*) => dlg.Destroy())
+    dlg.OnEvent("Close", (*) => dlg.Destroy())
+    dlg.Show("w414 h348")
 }
 
 ; ===================================================================
