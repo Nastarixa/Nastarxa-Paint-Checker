@@ -2262,7 +2262,8 @@ ReprocessCurrent(g, *) {
 
     g._results.Push(result)
     GDI.DisposeImage(pBitmap)
-    LoadAndShowFile(g, idx)
+    if !g["FastMode"].Value
+        LoadAndShowFile(g, idx)
     ClearPendingRefresh(g)
     g["ProgressBar"].Value := 100
     g["StatusText"].Value := "Refresh complete. " fileName " (" FormatDuration(imageDuration) ")"
