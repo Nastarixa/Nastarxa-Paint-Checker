@@ -196,3 +196,19 @@ See [LICENSE](/LICENSE).
 
 This project was developed with the assistance of AI tools.
 AI was used to support code writing, refactoring, and documentation, while the design direction, features, and final implementation were guided and reviewed by the author.
+## Paint Sequencer Handoff
+
+When the checker is launched from Nastarxa Paint Sequencer, it writes a review file into the output folder:
+
+* `paint_checker_review.json`
+* `paint_checker_review.txt`
+
+The review includes:
+
+* status
+* failed file names
+* issue messages
+* revision recommendations
+* notes about outer white and transparent background handling
+
+Use the Sequencer `Import Checker` button to read that review back into the project and continue revisions.
