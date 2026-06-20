@@ -739,16 +739,19 @@ ParseColorArgb(text) {
 ; ===================================================================
 ; Image Processing - Paint Checker
 ; ===================================================================
-ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progressCb := 0, heatmapColors := 0, sourceExt := "", fastMode := false) {
+ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progressCb := 0, heatmapColors := 0, sourceExt := "", fastMode := false, fastModeOutput := 1) {
     dims := GDI.GetDimensions(pBitmap)
     w := dims.w, h := dims.h
     totalPixels := w * h
+    fastModeOutput := fastModeOutput = 2 ? 2 : 1
+    wantFilled := !fastMode || fastModeOutput = 1
+    wantHeatmap := !fastMode || fastModeOutput = 2
     skipClusterAnalysis := fastMode || (sourceExt = "tga") || (totalPixels >= 4000000)
 
-    pFilled := GDI.CreateBitmap(w, h)
-    pHeatmap := fastMode ? 0 : GDI.CreateBitmap(w, h)
+    pFilled := wantFilled ? GDI.CreateBitmap(w, h) : 0
+    pHeatmap := wantHeatmap ? GDI.CreateBitmap(w, h) : 0
 
-    if !pFilled || (!fastMode && !pHeatmap)
+    if (wantFilled && !pFilled) || (wantHeatmap && !pHeatmap)
         return 0
 
     fillArgb := HexColorToArgb(fillColor)
@@ -769,14 +772,16 @@ ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progre
     srcScan0 := NumGet(srcBd, 16, "UPtr")
     srcStride := NumGet(srcBd, 8, "Int")
 
-    ; Lock filled bitmap for writing
-    fillBd := Buffer(bdSize, 0)
-    DllCall("gdiplus\GdipBitmapLockBits", "Ptr", pFilled, "Ptr", Rect
-        , "UInt", 2, "Int", 0x26200A, "Ptr", fillBd)
-    fillScan0 := NumGet(fillBd, 16, "UPtr")
-    fillStride := NumGet(fillBd, 8, "Int")
+    if wantFilled {
+        ; Lock filled bitmap for writing
+        fillBd := Buffer(bdSize, 0)
+        DllCall("gdiplus\GdipBitmapLockBits", "Ptr", pFilled, "Ptr", Rect
+            , "UInt", 2, "Int", 0x26200A, "Ptr", fillBd)
+        fillScan0 := NumGet(fillBd, 16, "UPtr")
+        fillStride := NumGet(fillBd, 8, "Int")
+    }
 
-    if !fastMode {
+    if wantHeatmap {
         ; Lock heatmap bitmap for writing
         heatBd := Buffer(bdSize, 0)
         DllCall("gdiplus\GdipBitmapLockBits", "Ptr", pHeatmap, "Ptr", Rect
@@ -793,7 +798,7 @@ ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progre
 
     ; Allocate distance buffer for edge gradient when heatmap is enabled
     maxEdgeDist := 5
-    distBuf := fastMode ? 0 : Buffer(w * h, 0xFF)
+    distBuf := wantHeatmap ? Buffer(w * h, 0xFF) : 0
 
     ; Process all pixels via direct memory access
     loop h {
@@ -801,7 +806,6 @@ ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progre
         loop w {
             x := A_Index - 1
             srcOff := y * srcStride + x * 4
-            fillOff := y * fillStride + x * 4
 
             a := NumGet(srcScan0, srcOff + 3, "UChar")
 
@@ -817,8 +821,11 @@ ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progre
                 if y > maxY
                     maxY := y
 
-                ; Filled: opaque magenta marker
-                NumPut("UInt", fillArgb, fillScan0, fillOff)
+                if wantFilled {
+                    fillOff := y * fillStride + x * 4
+                    ; Filled: opaque magenta marker
+                    NumPut("UInt", fillArgb, fillScan0, fillOff)
+                }
 
                 if a < 26
                     alphaBuckets[1]++
@@ -831,7 +838,7 @@ ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progre
                 else
                     alphaBuckets[5]++
 
-                if !fastMode {
+                if wantHeatmap {
                     heatOff := y * heatStride + x * 4
                     ; Heatmap: configurable color for transparent pixels
                     NumPut("UInt", transColor, heatScan0, heatOff)
@@ -841,8 +848,11 @@ ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progre
                 }
 
             } else {
-                ; Filled: fully transparent (no marker)
-                NumPut("UInt", 0x00000000, fillScan0, fillOff)
+                if wantFilled {
+                    fillOff := y * fillStride + x * 4
+                    ; Filled: fully transparent (no marker)
+                    NumPut("UInt", 0x00000000, fillScan0, fillOff)
+                }
 
                 ; Heatmap: leave as 0 for now (overwritten by edge/fill pass)
 
@@ -852,7 +862,7 @@ ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progre
             progressCb.Call(y + 1, h)
     }
 
-    if !fastMode {
+    if wantHeatmap {
         ; Distance transform (multi-pass dilation)
         loop maxEdgeDist {
             d := A_Index
@@ -896,8 +906,9 @@ ProcessPaintCheck(pBitmap, alphaThreshold := 128, fillColor := "#FF00FF", progre
 
     ; Unlock all bitmaps
     DllCall("gdiplus\GdipBitmapUnlockBits", "Ptr", pBitmap, "Ptr", srcBd)
-    DllCall("gdiplus\GdipBitmapUnlockBits", "Ptr", pFilled, "Ptr", fillBd)
-    if !fastMode
+    if wantFilled
+        DllCall("gdiplus\GdipBitmapUnlockBits", "Ptr", pFilled, "Ptr", fillBd)
+    if wantHeatmap
         DllCall("gdiplus\GdipBitmapUnlockBits", "Ptr", pHeatmap, "Ptr", heatBd)
 
     clusters := transparentPixels > 0 && !skipClusterAnalysis ? FindTransparentClusters(pBitmap, w, h, alphaThreshold) : []
@@ -1090,7 +1101,7 @@ GenerateReport(result, inputFile := "") {
 ; GUI
 ; ===================================================================
 BuildGui() {
-    g := Gui("+Resize +MinSize1120x900 +E0x10", "Nastarxa Paint Checker")
+    g := Gui("+Resize +MinSize1120x940 +E0x10", "Nastarxa Paint Checker")
     g.BackColor := "2B2D31"
     AddHeader(g)
     AddInputPanel(g)
@@ -1107,7 +1118,7 @@ BuildGui() {
     g._defaultSettings := 0
     ApplyStartupInput(g)
 
-    g.Show("w1160 h917")
+    g.Show("w1160 h964")
     SyncFillColorUi(g, g["FillColor"].Value)
     g._heatmapColors := GetDefaultHeatmapColors()
     g._defaultSettings := CaptureUiSettings(g)
@@ -1125,7 +1136,7 @@ AddHeader(g) {
 }
 
 AddInputPanel(g) {
-    g.AddGroupBox("x10 y55 w760 h316", "Input and Settings")
+    g.AddGroupBox("x10 y55 w760 h340", "Input and Settings")
     g.SetFont("s9 norm", "Segoe UI")
 
     g.AddText("x25 y82 cCFCFCF", "Input Path")
@@ -1142,15 +1153,18 @@ AddInputPanel(g) {
     g.AddCheckBox("x180 y180 vRecursive cCFCFCF", "Include Subfolders")
     g.AddCheckBox("x320 y180 vZipExport cCFCFCF", "Export Outputs as ZIP")
     g.AddCheckBox("x470 y180 vFastMode cCFCFCF", "Fast Mode")
-    g.AddButton("x548 y179 w72 h18 cFFFFFF Background3A3C42", "? Fast Mode")
+    g.AddText("x548 y181 cCFCFCF", "Output")
+    g.SetFont("s8")
+    g.AddDropDownList("x596 y179 w88 vFastModeOutput Choose1", ["Filled", "Heatmap"])
+    g.AddButton("x692 y179 w72 h18 cFFFFFF Background3A3C42", "? Fast Mode")
         .OnEvent("Click", ShowFastModeInfo.Bind(g))
 
     ; ==========================================================
     ; LEFT: SAVE OUTPUTS
     ; ==========================================================
-
-    g.AddText("x25 y205 cCFCFCF", "Save Outputs:")
-    g.AddCheckBox("x25 y225 vSaveFill cCFCFCF", "Filled")
+    g.SetFont("s9")
+    g.AddText("x25 y229 cCFCFCF", "Save Outputs:")
+    g.AddCheckBox("x25 y249 vSaveFill cCFCFCF", "Filled")
     g.AddCheckBox("x+5 yp vSaveHeatmap cCFCFCF", "Heatmap")
     g.AddCheckBox("x+5 yp Checked vSaveOverlay cCFCFCF", "Overlay")
     g.AddCheckBox("x+5 yp vSaveReport cCFCFCF", "Report")
@@ -1159,12 +1173,12 @@ AddInputPanel(g) {
     ; CENTER: FILL COLOR
     ; ==========================================================
 
-    g.AddText("x298 y205 cCFCFCF", "Fill Color:")
-    g.AddEdit("x298 y225 w72 h24 BackgroundFFFFFF c000000 vFillColor","#FF00FF")
-    g.AddProgress("x376 y225 w20 h20 cFF00FF Range0-1 vFillColorPreview",1)
+    g.AddText("x298 y229 cCFCFCF", "Fill Color:")
+    g.AddEdit("x298 y249 w72 h24 BackgroundFFFFFF c000000 vFillColor","#FF00FF")
+    g.AddProgress("x376 y249 w20 h20 cFF00FF Range0-1 vFillColorPreview",1)
     presetX := 403
     for i, preset in GetFillColorPresets() {
-        swatch := g.AddText("x" presetX " y225 w20 h20 Border Background" SubStr(preset, 2)
+        swatch := g.AddText("x" presetX " y249 w20 h20 Border Background" SubStr(preset, 2)
             " c000000 vFillPreset" i, " ")
         swatch.OnEvent("Click", ApplyFillColorChoice.Bind(g, preset))
         presetX += 22
@@ -1181,37 +1195,37 @@ AddInputPanel(g) {
     hc0 := g.HasOwnProp("_heatmapColors") ? g._heatmapColors : GetDefaultHeatmapColors()
     for _, f in gSteps {
         hex := Format("{:06X}", (hc0.%f% & 0xFFFFFF))
-        g.AddProgress("x" gx " y242 w" gSegW " h10 c" hex " Range0-1 vMainGrad_" f, 1)
+        g.AddProgress("x" gx " y266 w" gSegW " h10 c" hex " Range0-1 vMainGrad_" f, 1)
         gx += gSegW + 1
     }
-    g.AddText("x592 y254 w170 h14 cAAAAAA Center vMainGradLabel"
+    g.AddText("x592 y278 w170 h14 cAAAAAA Center vMainGradLabel"
         , FormatColorArgb(hc0.fill) " > " FormatColorArgb(hc0.far))
-    g.AddButton("x590 y214 w170 h24 cFFFFFF Background3A3C42 vHeatmapColorsBtn", "Heatmap Colors")
+    g.AddButton("x590 y238 w170 h24 cFFFFFF Background3A3C42 vHeatmapColorsBtn", "Heatmap Colors")
         .OnEvent("Click", ShowHeatmapColorsDialog.Bind(g))
 
 
 
-    g.AddText("x25 y260 cCFCFCF", "Alpha Threshold")
-    s := g.AddSlider("x20 y277 w300 h20 Range0-255 Tooltip vAlphaThreshold", 128)
-    g.AddText("x328 y277 w30 cFFFFFF vAlphaVal", "128")
+    g.AddText("x25 y284 cCFCFCF", "Alpha Threshold")
+    s := g.AddSlider("x20 y301 w300 h20 Range0-255 Tooltip vAlphaThreshold", 128)
+    g.AddText("x328 y301 w30 cFFFFFF vAlphaVal", "128")
     s.OnEvent("Change", (*) => g["AlphaVal"].Text := g["AlphaThreshold"].Value)
 
-    g.AddText("x363 y260 cCFCFCF", "Overlay Heatmap Opacity")
-    g.AddSlider("x358 y277 w100 h20 Range0-100 Tooltip vHeatmapOpacity", 35)
-    g.AddText("x462 y277 w42 h18 cFFFFFF Center vHeatmapOpacityVal", "35%")
+    g.AddText("x363 y284 cCFCFCF", "Overlay Heatmap Opacity")
+    g.AddSlider("x358 y301 w100 h20 Range0-100 Tooltip vHeatmapOpacity", 35)
+    g.AddText("x462 y301 w42 h18 cFFFFFF Center vHeatmapOpacityVal", "35%")
 
 
-    g.AddCheckBox("x522 y277 vWhiteInclude cCFCFCF", "Include white pixels")
-    g.AddCheckBox("x665 y277 vFillOnTop cCFCFCF", "Fill On Top")
+    g.AddCheckBox("x522 y301 vWhiteInclude cCFCFCF", "Include white pixels")
+    g.AddCheckBox("x665 y301 vFillOnTop cCFCFCF", "Fill On Top")
 
-    g.AddText("x25 y305 cCFCFCF", "Name Template:")
-    g.AddText("x117 y305 cAFAFAF", "{name} | {width} | {height} | {date} | {time}")
-    g.AddEdit("x25 y325 w410 h22 BackgroundFFFFFF c000000 vNameTemplate", "{name}")
-    g.AddButton("x450 y325 w100 h24 vFileListBtn cFFFFFF Background3A3C42", "📄 File List")
+    g.AddText("x25 y329 cCFCFCF", "Name Template:")
+    g.AddText("x117 y329 cAFAFAF", "{name} | {width} | {height} | {date} | {time}")
+    g.AddEdit("x25 y349 w410 h22 BackgroundFFFFFF c000000 vNameTemplate", "{name}")
+    g.AddButton("x450 y349 w100 h24 vFileListBtn cFFFFFF Background3A3C42", "📄 File List")
         .OnEvent("Click", ShowFileList.Bind(g))
-    g.AddButton("x555 y325 w100 h24 vGuideBtn cFFFFFF Background3A3C42", "❓ Guide")
+    g.AddButton("x555 y349 w100 h24 vGuideBtn cFFFFFF Background3A3C42", "❓ Guide")
         .OnEvent("Click", ShowGuide.Bind(g))
-    g.AddButton("x660 y325 w100 h24 vResetBtn cFFFFFF Background3A3C42", "🔄 Reset")
+    g.AddButton("x660 y349 w100 h24 vResetBtn cFFFFFF Background3A3C42", "🔄 Reset")
         .OnEvent("Click", ResetSettings.Bind(g))
 }
 
@@ -1226,13 +1240,13 @@ AddReportPanel(g) {
 }
 
 AddPreviewPanel(g) {
-    g.AddGroupBox("x10 y375 w760 h452", "Preview")
+    g.AddGroupBox("x10 y399 w760 h452", "Preview")
     g.SetFont("s8", "Segoe UI")
 
-    AddPreviewTile(g, 25, 400, "OrigPreview", "OrigLabel", "OrigViewBtn", "Original", "orig")
-    AddPreviewTile(g, 400, 400, "FillPreview", "FillLabel", "FillViewBtn", "Filled", "fill")
-    AddPreviewTile(g, 25, 600, "HeatPreview", "HeatLabel", "HeatViewBtn", "Heatmap", "heat")
-    AddPreviewTile(g, 400, 600, "DupPreview", "DupLabel", "DupViewBtn", "Overlay", "overlay")
+    AddPreviewTile(g, 25, 424, "OrigPreview", "OrigLabel", "OrigViewBtn", "Original", "orig")
+    AddPreviewTile(g, 400, 424, "FillPreview", "FillLabel", "FillViewBtn", "Filled", "fill")
+    AddPreviewTile(g, 25, 624, "HeatPreview", "HeatLabel", "HeatViewBtn", "Heatmap", "heat")
+    AddPreviewTile(g, 400, 624, "DupPreview", "DupLabel", "DupViewBtn", "Overlay", "overlay")
 
     AddPreviewToggles(g)
     AddPreviewNavigation(g)
@@ -1247,19 +1261,19 @@ AddPreviewTile(g, x, y, picName, labelName, btnName, labelText, which) {
 }
 
 AddPreviewToggles(g) {
-    g.AddText("x25 y797 w70 h22 cFFFFFF Background3A3C42 Center +0x100 +0x200 vPreviewRefresh", "Refresh")
+    g.AddText("x25 y821 w70 h22 cFFFFFF Background3A3C42 Center +0x100 +0x200 vPreviewRefresh", "Refresh")
         .OnEvent("Click", ReprocessCurrent.Bind(g))
-    g.AddText("x410 y800 cCFCFCF", "Combined Overlay:")
-    g.AddCheckBox("x510 y800 Checked vShowOrig cAAAAAA", "Original")
-    g.AddCheckBox("x580 y800 Checked vShowFill cAAAAAA", "Fill")
-    g.AddCheckBox("x625 y800 Checked vShowHeatmap cAAAAAA", "Heatmap")
+    g.AddText("x410 y824 cCFCFCF", "Combined Overlay:")
+    g.AddCheckBox("x510 y824 Checked vShowOrig cAAAAAA", "Original")
+    g.AddCheckBox("x580 y824 Checked vShowFill cAAAAAA", "Fill")
+    g.AddCheckBox("x625 y824 Checked vShowHeatmap cAAAAAA", "Heatmap")
 }
 
 AddPreviewNavigation(g) {
-    g.AddText("x10 y833 w345 h30 Background23262C cCFCFCF vNavInfo", "No image selected")
-    g.AddButton("x360 y831 w35 h30 cFFFFFF Background3A3C42 vNavPrev", "<").OnEvent("Click", NavigatePrev.Bind(g))
-    g.AddButton("x400 y831 w35 h30 cFFFFFF Background3A3C42 vNavNext", ">").OnEvent("Click", NavigateNext.Bind(g))
-    g.AddText("x440 y833 w330 h30 Background23262C cAAAAAA vNavTimer", "")
+    g.AddText("x10 y857 w345 h30 Background23262C cCFCFCF vNavInfo", "No image selected")
+    g.AddButton("x360 y855 w35 h30 cFFFFFF Background3A3C42 vNavPrev", "<").OnEvent("Click", NavigatePrev.Bind(g))
+    g.AddButton("x400 y855 w35 h30 cFFFFFF Background3A3C42 vNavNext", ">").OnEvent("Click", NavigateNext.Bind(g))
+    g.AddText("x440 y857 w330 h30 Background23262C cAAAAAA vNavTimer", "")
     g["NavPrev"].Enabled := false
     g["NavNext"].Enabled := false
 }
@@ -1268,29 +1282,29 @@ AddStatusAndActions(g) {
     g.SetFont("s8", "Segoe UI")
 
     g.AddText(
-        "x10 y867 w760 h22 Background23262C "
+        "x10 y891 w760 h22 Background23262C "
         . "cAAAAAA vStatusText",
         "Drop image files or a folder here to begin."
     )
 
     g.AddProgress(
-        "x10 y892 w760 h18 "
+        "x10 y916 w760 h18 "
         . "cE8A93A Background23262C "
         . "Range0-100 vProgressBar",
         0
     )
     g.SetFont("s9", "Segoe UI")
 
-    g.AddButton("x785 y833 w90 h30", "▶️ Start")
+    g.AddButton("x785 y857 w90 h30", "▶️ Start")
         .OnEvent("Click", StartProcessing.Bind(g))
 
-    g.AddButton("x880 y833 w75 h30", "💾 Save All")
+    g.AddButton("x880 y857 w75 h30", "💾 Save All")
         .OnEvent("Click", SaveAll.Bind(g))
 
-    g.AddButton("x960 y833 w75 h30", "🧹 Clear")
+    g.AddButton("x960 y857 w75 h30", "🧹 Clear")
         .OnEvent("Click", ClearAll.Bind(g))
 
-    g.AddButton("x1040 y833 w75 h30", "📂 Folder")
+    g.AddButton("x1040 y857 w75 h30", "📂 Folder")
         .OnEvent("Click", OpenOutputFolder.Bind(g))
 }
 
@@ -1316,6 +1330,7 @@ CaptureUiSettings(g) {
         fillColor: NormalizeHexColor(g["FillColor"].Value),
         fillOnTop: g["FillOnTop"].Value,
         fastMode: g["FastMode"].Value,
+        fastModeOutput: g["FastModeOutput"].Value,
         saveFill: g["SaveFill"].Value,
         saveHeatmap: g["SaveHeatmap"].Value,
         saveOverlay: g["SaveOverlay"].Value,
@@ -1352,6 +1367,8 @@ ApplyUiSettings(g, settings) {
             g["FillOnTop"].Value := settings.fillOnTop
         if settings.HasOwnProp("fastMode")
             g["FastMode"].Value := settings.fastMode
+        if settings.HasOwnProp("fastModeOutput")
+            g["FastModeOutput"].Value := settings.fastModeOutput
         if settings.HasOwnProp("saveFill")
             g["SaveFill"].Value := settings.saveFill
         if settings.HasOwnProp("saveHeatmap")
@@ -1381,6 +1398,7 @@ ApplyUiSettings(g, settings) {
     } finally {
         g._applyingSettings := false
     }
+    UpdateFastModeOutputState(g)
 }
 
 GetActiveResult(g) {
@@ -1400,6 +1418,7 @@ WireSettingEvents(g) {
         , "ShowHeatmap", "ShowOrig", "ShowFill", "FillOnTop"] {
         g[name].OnEvent("Click", (*) => OnSettingChanged(g))
     }
+    g["FastModeOutput"].OnEvent("Change", (*) => OnSettingChanged(g))
 
     g["FillColor"].OnEvent("Change", (*) => (
         FillColorEditChanged(g) ? OnSettingChanged(g) : 0
@@ -1419,6 +1438,7 @@ WireSettingEvents(g) {
 OnSettingChanged(g, *) {
     if g.HasOwnProp("_applyingSettings") && g._applyingSettings
         return
+    UpdateFastModeOutputState(g)
     g._defaultSettings := CaptureUiSettings(g)
     RefreshCurrentPreview(g)
     g._pendingRefresh := true
@@ -2112,7 +2132,7 @@ StartProcessing(g, *) {
         log .= "  preview: " (origPreviewFile ? "OK" : "FAILED") "`n"
 
         hc := g.HasOwnProp("_heatmapColors") ? g._heatmapColors : GetDefaultHeatmapColors()
-        result := ProcessPaintCheck(pBitmap, alphaThreshold, NormalizeHexColor(g["FillColor"].Value), progressFn, hc, inputExt, g["FastMode"].Value)
+        result := ProcessPaintCheck(pBitmap, alphaThreshold, NormalizeHexColor(g["FillColor"].Value), progressFn, hc, inputExt, g["FastMode"].Value, g["FastModeOutput"].Value)
 
         if !result {
             GDI.DisposeImage(pBitmap)
@@ -2134,6 +2154,8 @@ StartProcessing(g, *) {
         result.origPreviewFile := origPreviewFile
         result.durationMs := imageDuration
         result.settings := CaptureUiSettings(g)
+        if g["FastMode"].Value
+            result.fastModeOutput := g["FastModeOutput"].Value
 
         SaveOutputs(g, result, outputBase, nameOnly, pBitmap)
 
@@ -2236,7 +2258,7 @@ ReprocessCurrent(g, *) {
         g["StatusText"].Value := "Refreshing " fileName " (" done "/" total_ ")"
     )
     refreshImageStart := A_TickCount
-    result := ProcessPaintCheck(pBitmap, alphaThreshold, NormalizeHexColor(g["FillColor"].Value), progressFn, hc, inputExt, g["FastMode"].Value)
+    result := ProcessPaintCheck(pBitmap, alphaThreshold, NormalizeHexColor(g["FillColor"].Value), progressFn, hc, inputExt, g["FastMode"].Value, g["FastModeOutput"].Value)
     imageDuration := A_TickCount - refreshImageStart
     if !result {
         GDI.DisposeImage(pBitmap)
@@ -2275,8 +2297,9 @@ SaveOutputs(g, result, outputBase, nameOnly, srcBitmap := 0) {
     inputExt := result.HasOwnProp("inputExt") && result.inputExt ? result.inputExt : "png"
     ext := settings.fastMode ? "png" : inputExt
     if settings.fastMode {
-        settings.saveFill := 1
-        settings.saveHeatmap := 0
+        fastOut := result.HasOwnProp("fastModeOutput") ? result.fastModeOutput : (settings.HasOwnProp("fastModeOutput") ? settings.fastModeOutput : 1)
+        settings.saveFill := fastOut = 1
+        settings.saveHeatmap := fastOut = 2
         settings.saveOverlay := 0
         settings.saveReport := 0
         settings.zipExport := 0
@@ -2509,9 +2532,11 @@ SaveAllSelected(g, dlg) {
 SaveOutputsSelected(g, result, outputBase, nameOnly, saveFill, saveHeatmap, saveOverlay, saveReport) {
     basePath := outputBase "\" nameOnly
     settings := CaptureUiSettings(g)
-    if settings.fastMode {
-        saveFill := true
-        saveHeatmap := false
+    fastMode := result.HasOwnProp("fastMode") && result.fastMode
+    if fastMode {
+        fastOut := result.HasOwnProp("fastModeOutput") ? result.fastModeOutput : (settings.HasOwnProp("fastModeOutput") ? settings.fastModeOutput : 1)
+        saveFill := fastOut = 1
+        saveHeatmap := fastOut = 2
         saveOverlay := false
         saveReport := false
     }
@@ -2580,6 +2605,7 @@ ResetSettings(g, *) {
         SyncFillColorUi(g, "#FF00FF")
         g["FillOnTop"].Value := 0
         g["FastMode"].Value := 0
+        g["FastModeOutput"].Value := 1
         g["SaveFill"].Value := 0
         g["SaveHeatmap"].Value := 0
         g["SaveOverlay"].Value := 1
@@ -2599,6 +2625,14 @@ ResetSettings(g, *) {
     } finally {
         g._applyingSettings := false
     }
+    UpdateFastModeOutputState(g)
+}
+
+UpdateFastModeOutputState(g) {
+    try ctrl := g["FastModeOutput"]
+    catch
+        return
+    ctrl.Enabled := g["FastMode"].Value
 }
 
 ShowPreview(g, result) {
@@ -2609,10 +2643,16 @@ ShowPreview(g, result) {
     g["FillLabel"].Value := "Filled (" NormalizeHexColor(settings.fillColor) ")"
     fillDisp := GetDisplayBitmap(g, result, "fill", "", settings)
     fastMode := settings.HasOwnProp("fastMode") && settings.fastMode
+    fastModeOutput := result.HasOwnProp("fastModeOutput") ? result.fastModeOutput : (settings.HasOwnProp("fastModeOutput") ? settings.fastModeOutput : 1)
     if fastMode {
         overlayDisp := {bmp: 0, owned: false}
-        pFillThumb := 0
-        pHumThumb := 0
+        if fastModeOutput = 2 {
+            pFillThumb := 0
+            pHumThumb := result.HasOwnProp("heatmap") && result.heatmap ? GDI.CreateThumbnail(result.heatmap, 360, 170, 0xFF23262C, false) : 0
+        } else {
+            pFillThumb := fillDisp.bmp ? GDI.CreateThumbnail(fillDisp.bmp, 360, 170, 0xFF23262C, false) : 0
+            pHumThumb := 0
+        }
         pOvThumb := 0
     } else {
         overlayDisp := GetDisplayBitmap(g, result, "overlay", "", settings)
@@ -3137,7 +3177,7 @@ ShowGuide(g, *) {
         . "- Drop a folder to batch process all images`n"
         . "- Check 'Create subfolder' to keep files organized`n"
         . "- Check 'Include subfolders' for recursive batch scanning`n"
-        . "- Use Fast Mode to skip heatmaps, overlays, clusters, and preview thumbnails for the quickest pass`n"
+        . "- Use Fast Mode and choose Filled or Heatmap output for the quickest pass`n"
         . "- Adjust Alpha Threshold slider to control sensitivity`n"
         . "  (0 = all pixels treated transparent, 255 = only fully transparent treated)`n"
         . "- Heatmap / Original / Fill control which layers are blended into the overlay preview and export`n"
@@ -3163,22 +3203,24 @@ ShowFastModeInfo(g, *) {
     dlg.SetFont("s10 w600", "Segoe UI")
     dlg.AddText("x12 y10 cFFFFFF", "Fast Mode")
     dlg.SetFont("s9 norm", "Segoe UI")
-    dlg.AddText("x12 y36 w390 h250 cD0D0D0",
+    dlg.AddText("x12 y36 w390 h258 cD0D0D0",
         "Fast Mode is a speed-first preset for large files.`n`n"
         . "It changes the workflow like this:`n"
-        . "- Skips heatmap generation`n"
+        . "- Lets you choose filled-only or heatmap-only output`n"
+        . "- Forces PNG output for faster writing`n"
+        . "- Skips the unused output path`n"
         . "- Skips overlay generation`n"
         . "- Skips cluster analysis`n"
         . "- Skips preview thumbnail generation`n"
-        . "- Forces PNG output for faster writing`n`n"
+        . "- Keeps the non-selected output out of the fast path`n`n"
         . "You still get:`n"
-        . "- Filled output`n"
+        . "- The selected output only`n"
         . "- Transparency counts and bounds`n"
         . "- Pixel-accurate saved images with no anti-aliasing`n`n"
         . "Use it when speed matters more than the extra diagnostic visuals.")
     dlg.AddButton("x160 y304 w80 h26", "Close").OnEvent("Click", (*) => dlg.Destroy())
     dlg.OnEvent("Close", (*) => dlg.Destroy())
-    dlg.Show("w414 h348")
+    dlg.Show("w414 h356")
 }
 
 ; ===================================================================
